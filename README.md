@@ -23,6 +23,16 @@ History API:
 
 Python clients can use the typed async [SDK](sdk/python/README.md).
 
+## Strategy experiments
+
+Run deterministic, seat-rotated policy comparisons against the rules engine:
+
+```sh
+go run ./cmd/kuhhandel-strategy -suite champions -opponents finalists -players 3 -games 100 -seed 1000000
+```
+
+[Strategy research](strategy.md) records the model, best policy found, evidence, and limits.
+
 ## Messages
 
 Send:
