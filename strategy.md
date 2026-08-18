@@ -43,7 +43,7 @@ Under the server rules, a target holding a zero card should counter with zero in
 
 ## Evidence
 
-The experiments completed more than 500,000 games. Each comparison rotates the challenger through every seat. Every challenger policy faces the same shuffle seeds and policy random streams for a given opponent. A table cell measures one challenger against copies of the column policy.
+The experiments completed more than 600,000 games. Each comparison rotates the challenger through every seat. Every challenger policy faces the same shuffle seeds and policy random streams for a given opponent. A table cell measures one challenger against copies of the column policy.
 
 The broad policy comparison found auction-first play best:
 
@@ -83,6 +83,10 @@ Iterative self-play then trained replies against saved models and balanced model
 
 For five players, a new reply from the guide scored 19.6% ± 0.7% against the saved policy. A warm-start reply kept the saved policy unchanged at its 20.0% self-play share. A longer four-player run also kept the heuristic guide unchanged at 25.0%.
 
+A later round fixed warm-start exploration so it stays near the saved policy rather than returning to the heuristic guide. It expanded each action from 16 current-state facts to 32 facts: eight feature interactions and eight summaries of public bid and trade history. Failed validation blocks restored the strongest checkpoint before training resumed.
+
+The history-aware three-player reply peaked at 34.2% on validation seeds but scored 33.2% ± 0.6% on held-out seeds. The five-player reply scored 20.4% ± 0.3% on held-out seeds, then 19.5% ± 0.2% on 1,000 distant seeds. A faster four-player pass changed first-refusal choices but scored 24.0% ± 0.5% on held-out seeds. None replaced the prior recommendations.
+
 The replacement three-player policy changes a mean 2.15 turn choices and 0.05 bids per game from its guide. The five-player policy changes 0.52 turn choices, 0.22 bids, and 0.38 first-refusal choices against its guide. Neither learned policy changes trade responses or second offers under the fixed evaluation margin.
 
 ## Model
@@ -96,9 +100,11 @@ The server permits bids and auction closure without a bidder turn. The research 
 3. A bid reopens responses.
 4. Close after every bidder other than the leader passes.
 
-The policy sees only its snapshot: public state, its money, and its legal actions. It never sees other money, hidden offers, or deck order.
+The policy sees its snapshot and the public view after each move. It never sees other money, hidden offers, or deck order.
 
-The learned policy scores a compact set of legal actions from 16 visible features. It starts from the matching heuristic guide or a saved model, explores 2% of decisions during training, and replaces a guide move only when its learned score clears a fixed margin. Python updates the 80 weights with Adam. The Go worker keeps all rule use and full-game simulation on the Go side of one persistent JSON stream. Opponent pools may contain the guide and any number of saved models. Go balances the pool across seats and shuffle seeds.
+The learned policy scores a compact set of legal actions from 16 current-state facts, eight interactions, and eight summaries of public history. It estimates opponent cash from announced bids, auction results, and donkey payments. It starts from the matching heuristic guide or a saved model, explores 2% of decisions around that current policy, and replaces a guide move only when its learned score clears a fixed margin. Python updates the 160 weights with Adam. The Go worker keeps all rule use and full-game simulation on the Go side of one persistent JSON stream. Opponent pools may contain the guide and any number of saved models. Go balances the pool across seats and shuffle seeds.
+
+Payment-option workspaces are reused between decisions. In the 30-seed profile, this cut total allocations from 1.83 GB to 856 MB and wall time from 2.404 seconds to 1.319 seconds. A 1,000-seed five-player evaluation fell from about 58 seconds to 15 seconds.
 
 ## Reproduce
 
@@ -114,6 +120,9 @@ uv run --project learning kuhhandel-learn --players 3 --steps 100 --batch-seeds 
 uv run --project learning kuhhandel-learn --players 5 --steps 100 --batch-seeds 16 --eval-every 20 --eval-seeds 100 --held-out-seeds 300 --seed 6700000 --export learning/models/five-player.json
 uv run --project learning kuhhandel-learn --players 3 --steps 150 --batch-seeds 24 --eval-every 30 --eval-seeds 150 --held-out-seeds 500 --seed 8600000 --initial learning/models/three-player.json --opponent learning/models/three-player.json --exclude-guide
 uv run --project learning kuhhandel-learn --players 5 --steps 120 --batch-seeds 20 --eval-every 30 --eval-seeds 120 --held-out-seeds 400 --seed 8800000 --initial learning/models/five-player.json --opponent learning/models/five-player.json --exclude-guide
+uv run --project learning kuhhandel-learn --players 3 --steps 200 --batch-seeds 32 --eval-every 20 --eval-seeds 200 --held-out-seeds 500 --seed 9700000 --learning-rate 0.001 --freeze-features 16 --initial learning/models/three-player.json --opponent learning/models/three-player.json --exclude-guide
+uv run --project learning kuhhandel-learn --players 5 --steps 140 --batch-seeds 24 --eval-every 20 --eval-seeds 150 --held-out-seeds 400 --seed 10100000 --learning-rate 0.001 --freeze-features 16 --initial learning/models/five-player.json --opponent learning/models/five-player.json --exclude-guide
+uv run --project learning kuhhandel-learn --players 4 --steps 100 --batch-seeds 24 --eval-every 20 --eval-seeds 200 --held-out-seeds 500 --seed 11100000 --learning-rate 0.005 --freeze-features 16
 uv run --project learning kuhhandel-learn --players 3 --evaluate learning/models/three-player.json --held-out-seeds 1000 --seed 6500000
 uv run --project learning kuhhandel-learn --players 5 --evaluate learning/models/five-player.json --held-out-seeds 1000 --seed 6900000
 ```
@@ -123,6 +132,6 @@ uv run --project learning kuhhandel-learn --players 5 --evaluate learning/models
 - The result applies to the implemented second-edition rules and the discrete auction schedule above.
 - The opponent pool contains the heuristic guide and saved linear policies, not all possible policies.
 - The learned action scorer is linear. It does not test every policy form.
-- The policy tracks only whether it already made an optional trade at the current deck count. It does not infer hidden money from history.
+- Opponent cash estimates omit hidden overpayment and hidden trade offers.
 - No current result proves a Nash equilibrium or a globally best strategy.
-- The next strong test is a policy that can use action history and non-linear feature interactions.
+- The next strong test is a non-linear policy with a learned hidden state and a wider set of legal bid and offer candidates.

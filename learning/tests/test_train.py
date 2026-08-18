@@ -11,11 +11,13 @@ import torch
 from kuhhandel_learning.train import (
     Rollout,
     RolloutWorker,
+    fit_model,
     initial_weights,
     load_model,
     opponent_pool,
     parser,
     policy_gradient,
+    reward_order,
     train,
 )
 
@@ -27,8 +29,19 @@ class TrainerTests(unittest.TestCase):
         gradient = policy_gradient(rollout, 0.5, weights)
         self.assertTrue(torch.equal(gradient, torch.tensor([[2.5, 4]], dtype=torch.float64)))
 
+    def test_equal_checkpoint_keeps_training(self) -> None:
+        best = Rollout(1, 0.25, 0, 1, [], [], [])
+        self.assertEqual(reward_order(Rollout(1, 0.26, 0, 1, [], [], []), best), 1)
+        self.assertEqual(reward_order(Rollout(1, 0.25, 0, 1, [], [], []), best), 0)
+        self.assertEqual(reward_order(Rollout(1, 0.24, 0, 1, [], [], []), best), -1)
+
     def test_argument_ranges(self) -> None:
-        for arguments in (["--steps", "0"], ["--players", "2"], ["--baseline-rate", "2"]):
+        for arguments in (
+            ["--steps", "0"],
+            ["--players", "2"],
+            ["--baseline-rate", "2"],
+            ["--freeze-features", "-1"],
+        ):
             with contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
                     parser().parse_args(arguments)
@@ -65,17 +78,27 @@ class TrainerTests(unittest.TestCase):
             )
             result = train(arguments)
             self.assertEqual(result.games, 3)
-            self.assertEqual(load_model(arguments.checkpoint, 3).shape, (5, 16))
-            self.assertEqual(load_model(arguments.export, 3).shape, (5, 16))
-            opponents = opponent_pool([arguments.export], 3, (5, 16), True)
+            self.assertEqual(load_model(arguments.checkpoint, 3).shape, (5, 32))
+            self.assertEqual(load_model(arguments.export, 3).shape, (5, 32))
+            opponents = opponent_pool([arguments.export], 3, (5, 32), True)
             self.assertEqual(len(opponents), 2)
             self.assertEqual(torch.count_nonzero(opponents[0]), 0)
-            self.assertEqual(torch.count_nonzero(initial_weights(None, 3, (5, 16))), 0)
-            self.assertTrue(torch.equal(initial_weights(arguments.export, 3, (5, 16)), opponents[1]))
+            self.assertEqual(torch.count_nonzero(initial_weights(None, 3, (5, 32))), 0)
+            self.assertTrue(torch.equal(initial_weights(arguments.export, 3, (5, 32)), opponents[1]))
             with self.assertRaises(RuntimeError):
-                opponent_pool([], 3, (5, 16), False)
+                opponent_pool([], 3, (5, 32), False)
             with self.assertRaises(RuntimeError):
                 load_model(arguments.export, 5)
+
+    def test_fit_model_derives_new_zero_weights(self) -> None:
+        legacy = torch.ones((5, 16), dtype=torch.float64)
+        fitted = fit_model(legacy, (5, 32))
+        self.assertTrue(torch.equal(fitted[:, :16], legacy))
+        self.assertEqual(torch.count_nonzero(fitted[:, 16:]), 0)
+        with self.assertRaises(RuntimeError):
+            fit_model(torch.zeros((4, 16), dtype=torch.float64), (5, 32))
+        with self.assertRaises(RuntimeError):
+            fit_model(torch.zeros((5, 15), dtype=torch.float64), (5, 32))
 
 
 if __name__ == "__main__":

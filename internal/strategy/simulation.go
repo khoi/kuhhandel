@@ -12,6 +12,10 @@ type Result struct {
 	Trades    int
 }
 
+type publicObserver interface {
+	Observe(game.PublicView)
+}
+
 func Play(seed uint64, policies []Policy) (Result, error) {
 	if len(policies) < 3 || len(policies) > 5 {
 		return Result{}, fmt.Errorf("player count must be between three and five")
@@ -30,6 +34,7 @@ func Play(seed uint64, policies []Policy) (Result, error) {
 	if err := apply(aggregate, simulationIdentity(0).ID, game.StartGame{Seed: seed}); err != nil {
 		return Result{}, err
 	}
+	observePolicies(policies, aggregate.Public())
 	auctions := 0
 	bids := 0
 	trades := 0
@@ -53,7 +58,7 @@ func Play(seed uint64, policies []Policy) (Result, error) {
 			if _, tradesNow := command.(game.BeginTrade); tradesNow {
 				trades++
 			}
-			if err := apply(aggregate, public.TurnPlayerID, command); err != nil {
+			if err := applyObserved(aggregate, policies, public.TurnPlayerID, command); err != nil {
 				return Result{}, err
 			}
 		case game.PhaseAuction:
@@ -70,7 +75,7 @@ func Play(seed uint64, policies []Policy) (Result, error) {
 			if err != nil {
 				return Result{}, err
 			}
-			if err := apply(aggregate, auctioneerID, policies[seat].ResolveAuction(snapshot)); err != nil {
+			if err := applyObserved(aggregate, policies, auctioneerID, policies[seat].ResolveAuction(snapshot)); err != nil {
 				return Result{}, err
 			}
 		case game.PhaseTradeResponse, game.PhaseTradeRecounter:
@@ -80,7 +85,7 @@ func Play(seed uint64, policies []Policy) (Result, error) {
 			if err != nil {
 				return Result{}, err
 			}
-			if err := apply(aggregate, targetID, policies[seat].RespondTrade(snapshot)); err != nil {
+			if err := applyObserved(aggregate, policies, targetID, policies[seat].RespondTrade(snapshot)); err != nil {
 				return Result{}, err
 			}
 		case game.PhaseTradeReoffer:
@@ -90,7 +95,7 @@ func Play(seed uint64, policies []Policy) (Result, error) {
 			if err != nil {
 				return Result{}, err
 			}
-			if err := apply(aggregate, challengerID, policies[seat].ReofferTrade(snapshot)); err != nil {
+			if err := applyObserved(aggregate, policies, challengerID, policies[seat].ReofferTrade(snapshot)); err != nil {
 				return Result{}, err
 			}
 		default:
@@ -115,7 +120,7 @@ func runAuction(aggregate *game.Aggregate, policies []Policy) (int, error) {
 			neededPasses--
 		}
 		if passes >= neededPasses {
-			return bidCount, apply(aggregate, public.Auction.AuctioneerID, game.CloseAuction{})
+			return bidCount, applyObserved(aggregate, policies, public.Auction.AuctioneerID, game.CloseAuction{})
 		}
 		if seat == auctioneerSeat || seat == leaderSeat {
 			seat = (seat + 1) % len(policies)
@@ -128,7 +133,7 @@ func runAuction(aggregate *game.Aggregate, policies []Policy) (int, error) {
 		}
 		bid, willBid := policies[seat].Bid(snapshot)
 		if willBid {
-			if err := apply(aggregate, playerID, bid); err != nil {
+			if err := applyObserved(aggregate, policies, playerID, bid); err != nil {
 				return 0, err
 			}
 			bidCount++
@@ -149,6 +154,22 @@ func apply(aggregate *game.Aggregate, actorID string, command game.Command) erro
 		return fmt.Errorf("apply %T: %w", command, err)
 	}
 	return nil
+}
+
+func applyObserved(aggregate *game.Aggregate, policies []Policy, actorID string, command game.Command) error {
+	if err := apply(aggregate, actorID, command); err != nil {
+		return err
+	}
+	observePolicies(policies, aggregate.Public())
+	return nil
+}
+
+func observePolicies(policies []Policy, public game.PublicView) {
+	for _, policy := range policies {
+		if observer, ok := policy.(publicObserver); ok {
+			observer.Observe(public)
+		}
+	}
 }
 
 func simulationIdentity(seat int) game.Identity {

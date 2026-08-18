@@ -136,12 +136,18 @@ def policy_gradient(rollout: Rollout, baseline: float, weights: torch.Tensor) ->
     return reward - baseline * mean
 
 
+def reward_order(candidate: Rollout, best: Rollout) -> int:
+    return int(candidate.mean_reward > best.mean_reward) - int(candidate.mean_reward < best.mean_reward)
+
+
 def train(arguments: argparse.Namespace) -> Rollout:
     root = repository_root(arguments.root)
     with RolloutWorker(root, arguments.go) as worker:
         decisions, features = worker.shape()
         shape = (decisions, features)
         weights = torch.nn.Parameter(initial_weights(arguments.initial, arguments.players, shape))
+        if arguments.freeze_features > features:
+            raise RuntimeError(f"cannot freeze {arguments.freeze_features} of {features} features")
         opponents = opponent_pool(
             arguments.opponent,
             arguments.players,
@@ -160,6 +166,7 @@ def train(arguments: argparse.Namespace) -> Rollout:
             training_seed = arguments.seed + (step - 1) * arguments.batch_seeds
             rollout = worker.rollout(weights, arguments.players, arguments.batch_seeds, training_seed, True, opponents)
             gradient = policy_gradient(rollout, baseline, weights)
+            gradient[:, : arguments.freeze_features] = 0
             optimizer.zero_grad(set_to_none=True)
             weights.grad = -gradient
             torch.nn.utils.clip_grad_norm_([weights], arguments.max_gradient)
@@ -176,10 +183,16 @@ def train(arguments: argparse.Namespace) -> Rollout:
                 opponents,
             )
             print_result(f"checkpoint {step}", evaluated)
-            if evaluated.mean_reward > best.mean_reward:
+            order = reward_order(evaluated, best)
+            if order > 0:
                 best = evaluated
                 best_weights = weights.detach().clone()
                 best_step = step
+            elif order < 0:
+                with torch.no_grad():
+                    weights.copy_(best_weights)
+                optimizer.state.clear()
+                baseline = best.mean_reward
         held_out = worker.rollout(
             best_weights,
             arguments.players,
@@ -197,15 +210,14 @@ def train(arguments: argparse.Namespace) -> Rollout:
 
 def evaluate(arguments: argparse.Namespace) -> Rollout:
     root = repository_root(arguments.root)
-    weights = load_model(arguments.evaluate, arguments.players)
     with RolloutWorker(root, arguments.go) as worker:
         decisions, features = worker.shape()
-        if weights.shape != (decisions, features):
-            raise RuntimeError(f"model shape {tuple(weights.shape)} does not match {(decisions, features)}")
+        shape = (decisions, features)
+        weights = fit_model(load_model(arguments.evaluate, arguments.players), shape)
         opponents = opponent_pool(
             arguments.opponent,
             arguments.players,
-            (decisions, features),
+            shape,
             not arguments.exclude_guide,
         )
         result = worker.rollout(weights, arguments.players, arguments.held_out_seeds, arguments.seed, False, opponents)
@@ -268,10 +280,7 @@ def opponent_pool(
 ) -> list[torch.Tensor]:
     opponents = [torch.zeros(shape, dtype=torch.float64)] if include_guide else []
     for path in paths:
-        model = load_model(path, players)
-        if model.shape != shape:
-            raise RuntimeError(f"opponent shape {tuple(model.shape)} does not match {tuple(shape)}")
-        opponents.append(model)
+        opponents.append(fit_model(load_model(path, players), shape))
     if not opponents:
         raise RuntimeError("opponent pool is empty")
     return opponents
@@ -280,10 +289,17 @@ def opponent_pool(
 def initial_weights(path: Path | None, players: int, shape: tuple[int, int]) -> torch.Tensor:
     if path is None:
         return torch.zeros(shape, dtype=torch.float64)
-    weights = load_model(path, players)
-    if weights.shape != shape:
-        raise RuntimeError(f"model shape {tuple(weights.shape)} does not match {shape}")
-    return weights
+    return fit_model(load_model(path, players), shape)
+
+
+def fit_model(weights: torch.Tensor, shape: tuple[int, int]) -> torch.Tensor:
+    widths = {shape[1] // 2, shape[1]}
+    if weights.ndim != 2 or weights.shape[0] != shape[0] or weights.shape[1] not in widths:
+        raise RuntimeError(f"model shape {tuple(weights.shape)} does not fit {shape}")
+    if weights.shape[1] == shape[1]:
+        return weights
+    missing = torch.zeros((shape[0], shape[1] - weights.shape[1]), dtype=weights.dtype)
+    return torch.cat((weights, missing), dim=1)
 
 
 def print_result(label: str, rollout: Rollout) -> None:
@@ -304,6 +320,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--learning-rate", type=positive_float, default=0.005)
     result.add_argument("--baseline-rate", type=unit_float, default=0.02)
     result.add_argument("--max-gradient", type=positive_float, default=5)
+    result.add_argument("--freeze-features", type=nonnegative_int, default=0)
     result.add_argument("--checkpoint", type=Path, default=Path("learning/checkpoints/best.pt"))
     result.add_argument("--export", type=Path)
     result.add_argument("--evaluate", type=Path)

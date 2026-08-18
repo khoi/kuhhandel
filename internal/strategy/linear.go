@@ -10,10 +10,13 @@ import (
 )
 
 const (
-	LinearDecisionCount = 5
-	LinearFeatureCount  = 16
-	linearExploration   = 0.02
-	linearEvalMargin    = 0.5
+	LinearDecisionCount           = 5
+	linearBaseFeatureCount        = 16
+	linearInteractionFeatureCount = 8
+	linearHistoryFeatureCount     = 8
+	LinearFeatureCount            = linearBaseFeatureCount + linearInteractionFeatureCount + linearHistoryFeatureCount
+	linearExploration             = 0.02
+	linearEvalMargin              = 0.5
 )
 
 const (
@@ -38,6 +41,7 @@ type LinearPolicy struct {
 	steps              []linearStep
 	deviations         [LinearDecisionCount]int
 	lastTradeRemaining int
+	history            linearHistory
 }
 
 type linearFeatures [LinearFeatureCount]float64
@@ -93,6 +97,7 @@ func NewLinearModel(weights [][]float64) (LinearModel, error) {
 func (policy *LinearPolicy) Turn(snapshot game.Snapshot) game.Command {
 	guided := policy.guide.Turn(snapshot)
 	candidates := markGuided(linearTurnCandidates(snapshot, policy.lastTradeRemaining), guided, linearTurnFeaturesFor(snapshot, guided))
+	policy.enrich(linearTurnDecision, snapshot, candidates)
 	command := policy.choose(linearTurnDecision, candidates).(game.Command)
 	if _, trading := command.(game.BeginTrade); trading {
 		policy.lastTradeRemaining = snapshot.Public.DeckRemaining
@@ -107,7 +112,9 @@ func (policy *LinearPolicy) Bid(snapshot game.Snapshot) (game.PlaceBid, bool) {
 	if will {
 		features = linearBidFeatures(snapshot, bid.Amount)
 	}
-	selected := policy.choose(linearBidDecision, markGuided(linearBidCandidates(snapshot), guided, features)).(linearBid)
+	candidates := markGuided(linearBidCandidates(snapshot), guided, features)
+	policy.enrich(linearBidDecision, snapshot, candidates)
+	selected := policy.choose(linearBidDecision, candidates).(linearBid)
 	return selected.bid, selected.will
 }
 
@@ -118,6 +125,7 @@ func (policy *LinearPolicy) ResolveAuction(snapshot game.Snapshot) game.ResolveA
 		features = linearBidFeatures(snapshot, moneyTotal(guided.Payment))
 	}
 	candidates := markGuided(linearResolveCandidates(snapshot), guided, features)
+	policy.enrich(linearResolveDecision, snapshot, candidates)
 	return policy.choose(linearResolveDecision, candidates).(game.ResolveAuction)
 }
 
@@ -128,13 +136,19 @@ func (policy *LinearPolicy) RespondTrade(snapshot game.Snapshot) game.Command {
 		features = linearTradeFeatures(snapshot, counter.Offer)
 	}
 	candidates := markGuided(linearRespondCandidates(snapshot), guided, features)
+	policy.enrich(linearRespondDecision, snapshot, candidates)
 	return policy.choose(linearRespondDecision, candidates).(game.Command)
 }
 
 func (policy *LinearPolicy) ReofferTrade(snapshot game.Snapshot) game.ReofferTrade {
 	guided := policy.guide.ReofferTrade(snapshot)
 	candidates := markGuided(linearReofferCandidates(snapshot), guided, linearTradeFeatures(snapshot, guided.Offer))
+	policy.enrich(linearReofferDecision, snapshot, candidates)
 	return policy.choose(linearReofferDecision, candidates).(game.ReofferTrade)
+}
+
+func (policy *LinearPolicy) Observe(public game.PublicView) {
+	policy.history.observe(public)
 }
 
 func (policy *LinearPolicy) Gradient() LinearGradient {
@@ -155,6 +169,17 @@ func (policy *LinearPolicy) Deviations() [LinearDecisionCount]int {
 	return policy.deviations
 }
 
+func (policy *LinearPolicy) enrich(decision int, snapshot game.Snapshot, candidates []linearCandidate) {
+	for index := range candidates {
+		features := &candidates[index].features
+		interactions := linearInteractions(decision, *features)
+		interactionEnd := linearBaseFeatureCount + linearInteractionFeatureCount
+		copy(features[linearBaseFeatureCount:interactionEnd], interactions[:])
+		history := policy.history.features(snapshot.Self.PlayerID, linearOtherPlayer(decision, snapshot, candidates[index].action))
+		copy(features[interactionEnd:], history[:])
+	}
+}
+
 func (policy *LinearPolicy) choose(decision int, candidates []linearCandidate) any {
 	if len(candidates) == 1 {
 		return candidates[0].action
@@ -167,13 +192,22 @@ func (policy *LinearPolicy) choose(decision int, candidates []linearCandidate) a
 			break
 		}
 	}
-	selected := guided
+	anchor := guided
+	for index := range probabilities {
+		if probabilities[index] > probabilities[anchor] {
+			anchor = index
+		}
+	}
+	if probabilities[anchor] <= probabilities[guided]*math.Exp(linearEvalMargin) {
+		anchor = guided
+	}
+	selected := anchor
 	if policy.sample {
 		policyProbabilities := make([]float64, len(candidates))
 		for index, probability := range probabilities {
 			policyProbabilities[index] = linearExploration * probability / total
 		}
-		policyProbabilities[guided] += 1 - linearExploration
+		policyProbabilities[anchor] += 1 - linearExploration
 		draw := policy.random.Float64()
 		selected = len(candidates) - 1
 		for index, probability := range policyProbabilities {
@@ -195,16 +229,6 @@ func (policy *LinearPolicy) choose(decision int, candidates []linearCandidate) a
 			gradient[feature] *= scale
 		}
 		policy.steps = append(policy.steps, linearStep{decision: decision, gradient: gradient})
-	} else {
-		best := guided
-		for index := range probabilities {
-			if probabilities[index] > probabilities[best] {
-				best = index
-			}
-		}
-		if probabilities[best] > probabilities[guided]*math.Exp(linearEvalMargin) {
-			selected = best
-		}
 	}
 	if selected != guided {
 		policy.deviations[decision]++
