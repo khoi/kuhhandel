@@ -6,6 +6,13 @@ import (
 	"github.com/khoi/kuhhandel/internal/strategy"
 )
 
+func configsForSuite(name string, samples int) ([]strategy.HeuristicConfig, error) {
+	if name == "search" {
+		return searchConfigs(samples), nil
+	}
+	return candidateConfigs(name)
+}
+
 func candidateConfigs(name string) ([]strategy.HeuristicConfig, error) {
 	switch name {
 	case "archetypes":
@@ -160,4 +167,50 @@ func variant(base strategy.HeuristicConfig, name string, change func(*strategy.H
 	base.Name = name
 	change(&base)
 	return base
+}
+
+func searchConfigs(count int) []strategy.HeuristicConfig {
+	configs := make([]strategy.HeuristicConfig, count)
+	for index := range configs {
+		sample := index + 1
+		bluff := halton(sample, 13)
+		if bluff < 0.3 {
+			bluff = 0
+		} else {
+			bluff = (bluff - 0.3) * 0.4 / 0.7
+		}
+		tradeAt := 0
+		switch value := halton(sample, 17); {
+		case value >= 0.97:
+			tradeAt = 40
+		case value >= 0.92:
+			tradeAt = 16
+		case value >= 0.85:
+			tradeAt = 8
+		case value >= 0.75:
+			tradeAt = 4
+		}
+		configs[index] = strategy.HeuristicConfig{
+			Name:                 fmt.Sprintf("search-%03d", sample),
+			AuctionFraction:      0.3 + 0.6*halton(sample, 2),
+			DenialFraction:       halton(sample, 3),
+			ReserveFraction:      0.1 + 0.5*halton(sample, 5),
+			FirstRefusalFraction: 0.05 + 0.55*halton(sample, 7),
+			TradeFraction:        0.3 + halton(sample, 11),
+			TradeAtDeckRemaining: tradeAt,
+			BluffChance:          bluff,
+		}
+	}
+	return configs
+}
+
+func halton(index, base int) float64 {
+	result := 0.0
+	fraction := 1 / float64(base)
+	for index > 0 {
+		result += fraction * float64(index%base)
+		index /= base
+		fraction /= float64(base)
+	}
+	return result
 }
