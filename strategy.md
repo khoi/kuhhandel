@@ -43,7 +43,7 @@ Under the server rules, a target holding a zero card should counter with zero in
 
 ## Evidence
 
-The experiments completed more than 900,000 games. Each comparison rotates the challenger through every seat. Every challenger policy faces the same shuffle seeds and policy random streams for a given opponent. A table cell measures one challenger against copies of the column policy.
+The experiments completed more than 1.2 million games. Each comparison rotates the challenger through every seat. Every challenger policy faces the same shuffle seeds and policy random streams for a given opponent. A table cell measures one challenger against copies of the column policy.
 
 The broad policy comparison found auction-first play best:
 
@@ -97,7 +97,9 @@ The next search added an eight-unit tanh residual to each action score and finer
 
 The three-player result used 30,000 unseen shuffle seeds with every seat rotation. The promoted policy scored 43.6% ± 0.3% against the heuristic guide on 10,000 further seeds. A new reply peaked at 34.8% during training but fell to 31.1% ± 0.7% on 1,500 held-out seeds, so it was rejected.
 
-The promoted three-player policy changes a mean 2.09 turn choices, 1.73 bids, and 0.46 first-refusal choices per game from its guide. The five-player policy changes 0.52 turn choices, 0.22 bids, and 0.38 first-refusal choices. Neither learned policy changes trade responses or second offers under the fixed evaluation margin.
+A decision-row ablation then found that the learned first-refusal row reduced results. Replacing it with the guide scored 33.89% ± 0.11% against the saved policy over 30,000 unseen seeds. Reducing the turn row by 10% then scored 33.622% ± 0.050% against the ablated policy over another 30,000 seeds. The final model scored 33.781% ± 0.114% against the last committed model over 30,000 further seeds and 44.1% ± 0.3% against the guide over 10,000 seeds. A trained reply against the ablated model scored 33.4% ± 0.3% on 10,000 fresh seeds, so it was rejected.
+
+The final three-player policy changes a mean 2.03 turn choices and 1.69 bids per game from its guide. It now uses the guide for first refusal. The five-player policy changes 0.52 turn choices, 0.22 bids, and 0.38 first-refusal choices. Neither learned policy changes trade responses or second offers under the fixed evaluation margin.
 
 ## Model
 
