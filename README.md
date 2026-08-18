@@ -41,6 +41,18 @@ Money keys are `0`, `10`, `50`, `100`, `200`, and `500`. Values are card counts.
 
 The first player is the host. The host can start once three to five players have joined. The server checks every turn, bid, payment, trade, and settlement. Clients should render `game.public`, `game.self`, and `game.self.legalActions` without keeping their own game state.
 
+## Security limits
+
+- The server binds each socket to one authenticated player and revokes the older socket when that session reconnects.
+- Event logs contain hashes of session tokens, not bearer tokens.
+- Plain SQLite paths use owner-only file permissions.
+- The server accepts text JSON messages up to 8 KiB. It rejects binary messages, extra fields, duplicate fields, unsafe request IDs, and payloads on commands that take none.
+- Each socket can send at most 64 messages per one-second window. Slow clients are disconnected when their outbound queue fills.
+- Request IDs cannot be reused for accepted commands, including after a restart.
+- Browser WebSocket connections must use the server's origin.
+- Production deployments must serve the endpoint through TLS.
+- The rules engine checks the actor, host, turn, phase, animal ownership, money ownership, bid order, trade target, and settlement before it writes an event.
+
 ## Verify
 
 ```sh

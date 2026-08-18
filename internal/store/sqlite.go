@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -14,12 +15,26 @@ import (
 )
 
 var ErrConflict = errors.New("event version conflict")
+var ErrDuplicateCommand = errors.New("command already handled")
 
 type SQLite struct {
 	database *sql.DB
 }
 
 func Open(path string) (*SQLite, error) {
+	if path != ":memory:" && !strings.HasPrefix(path, "file:") {
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+		if err != nil {
+			return nil, err
+		}
+		if err := file.Chmod(0600); err != nil {
+			file.Close()
+			return nil, err
+		}
+		if err := file.Close(); err != nil {
+			return nil, err
+		}
+	}
 	database, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
@@ -55,6 +70,14 @@ func (store *SQLite) Append(ctx context.Context, gameID string, event game.Event
 		return err
 	}
 	defer transaction.Rollback()
+	var existing int
+	err = transaction.QueryRowContext(ctx, "SELECT 1 FROM game_events WHERE game_id = ? AND command_id = ?", gameID, event.CommandID).Scan(&existing)
+	if err == nil {
+		return ErrDuplicateCommand
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
 	var current uint64
 	if err := transaction.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM game_events WHERE game_id = ?", gameID).Scan(&current); err != nil {
 		return err
@@ -78,6 +101,9 @@ func (store *SQLite) Append(ctx context.Context, gameID string, event game.Event
 		occurredAt.Format(time.RFC3339Nano),
 	)
 	if err != nil {
+		if strings.Contains(err.Error(), "game_events.game_id, game_events.command_id") {
+			return ErrDuplicateCommand
+		}
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") || strings.Contains(err.Error(), "PRIMARY KEY constraint failed") {
 			return ErrConflict
 		}

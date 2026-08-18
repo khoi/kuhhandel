@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
@@ -83,6 +84,11 @@ func TestWebSocketSessionResumesAfterServerRestart(t *testing.T) {
 	}
 	if !reflect.DeepEqual(resumed.Game.Self, started.Game.Self) {
 		t.Fatalf("resumed self = %+v, started self = %+v", resumed.Game.Self, started.Game.Self)
+	}
+	expectError(t, resumedClient.request(t, "start", "turn.auction", nil), "duplicate_request")
+	opened := resumedClient.request(t, "after-restart", "turn.auction", nil)
+	if opened.Type != "snapshot" || opened.Game.Version != started.Game.Version+1 {
+		t.Fatalf("fresh request after restart = %+v", opened)
 	}
 }
 
@@ -302,6 +308,311 @@ func TestWebSocketKeepsConcurrentGamesIsolated(t *testing.T) {
 	}
 }
 
+func TestWebSocketRejectsForgedNoPayloadCommandWithoutChangingState(t *testing.T) {
+	_, _, url := newTestServer(t, t.TempDir()+"/games.db")
+	room := newRoom(t, url)
+	started := room.start(t)
+	forged := room.bob.request(t, "forged-turn", "turn.auction", map[string]any{"actorId": room.hostSession.PlayerID})
+	if forged.Error == nil || forged.Error.Code != "invalid_request" {
+		t.Fatalf("forged turn = %+v", forged)
+	}
+	opened := room.host.request(t, "real-turn", "turn.auction", nil)
+	if opened.Type != "snapshot" || opened.Game.Version != started.Game.Version+1 || opened.Game.Public.Auction.AuctioneerID != room.hostSession.PlayerID {
+		t.Fatalf("real turn = %+v", opened)
+	}
+}
+
+func TestWebSocketRejectsUnknownAndDuplicatePayloadFields(t *testing.T) {
+	_, _, url := newTestServer(t, t.TempDir()+"/games.db")
+	room := newRoom(t, url)
+	room.start(t)
+	opened := room.host.request(t, "auction", "turn.auction", nil)
+	unknown := room.bob.request(t, "unknown-field", "auction.bid", json.RawMessage(`{"amount":10,"payment":{"10":1},"actorId":"forged"}`))
+	if unknown.Error == nil || unknown.Error.Code != "invalid_request" {
+		t.Fatalf("unknown field = %+v", unknown)
+	}
+	duplicate := room.bob.request(t, "duplicate-field", "auction.bid", json.RawMessage(`{"amount":10,"amount":20,"payment":{"10":2}}`))
+	if duplicate.Error == nil || duplicate.Error.Code != "invalid_request" {
+		t.Fatalf("duplicate field = %+v", duplicate)
+	}
+	accepted := room.bob.request(t, "valid-bid", "auction.bid", map[string]any{"amount": 10, "payment": game.Money{Ten: 1}})
+	if accepted.Type != "snapshot" || accepted.Game.Version != opened.Game.Version+1 || accepted.Game.Public.Auction.HighestBid != 10 {
+		t.Fatalf("valid bid = %+v", accepted)
+	}
+}
+
+func TestWebSocketRejectsForgedEnvelopeFields(t *testing.T) {
+	_, _, url := newTestServer(t, t.TempDir()+"/games.db")
+	room := newRoom(t, url)
+	started := room.start(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	forged, err := room.host.raw(ctx, []byte(fmt.Sprintf(`{"id":"forged-envelope","type":"turn.auction","payload":null,"playerId":%q}`, room.bobSession.PlayerID)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if forged.Error == nil || forged.Error.Code != "invalid_request" {
+		t.Fatalf("forged envelope = %+v", forged)
+	}
+	opened := room.host.request(t, "valid-envelope", "turn.auction", nil)
+	if opened.Type != "snapshot" || opened.Game.Version != started.Game.Version+1 {
+		t.Fatalf("valid envelope = %+v", opened)
+	}
+}
+
+func TestWebSocketRejectsUnsafeRequestMetadata(t *testing.T) {
+	_, _, url := newTestServer(t, t.TempDir()+"/games.db")
+	requests := []map[string]any{
+		{"id": strings.Repeat("a", 65), "type": "room.create", "payload": map[string]any{"name": "Alice"}},
+		{"id": "bad/id", "type": "room.create", "payload": map[string]any{"name": "Alice"}},
+		{"id": " padded", "type": "room.create", "payload": map[string]any{"name": "Alice"}},
+		{"id": "valid-id", "type": strings.Repeat("x", 33), "payload": nil},
+	}
+	for index, request := range requests {
+		client := newClient(t, url)
+		payload, err := json.Marshal(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		response, err := client.raw(ctx, payload)
+		cancel()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.Error == nil || response.Error.Code != "invalid_request" || response.RequestID != "" {
+			t.Fatalf("unsafe request %d = %+v", index, response)
+		}
+	}
+	valid := newClient(t, url).request(t, "safe-id_1.2:3", "room.create", map[string]any{"name": "Alice"})
+	if valid.Type != "snapshot" {
+		t.Fatalf("valid request = %+v", valid)
+	}
+}
+
+func TestWebSocketRejectsReplayedRequestIDWithoutChangingState(t *testing.T) {
+	_, _, url := newTestServer(t, t.TempDir()+"/games.db")
+	room := newRoom(t, url)
+	started := room.start(t)
+	replayed := room.host.request(t, "start", "turn.auction", nil)
+	if replayed.Error == nil || replayed.Error.Code != "duplicate_request" {
+		t.Fatalf("replayed request = %+v", replayed)
+	}
+	opened := room.host.request(t, "fresh-request", "turn.auction", nil)
+	if opened.Type != "snapshot" || opened.Game.Version != started.Game.Version+1 {
+		t.Fatalf("fresh request = %+v", opened)
+	}
+}
+
+func TestWebSocketRejectsControlCharactersInPlayerNames(t *testing.T) {
+	_, _, url := newTestServer(t, t.TempDir()+"/games.db")
+	for index, name := range []string{"Alice\nAdmin", "Alice\x00Admin", "Alice\u202eAdmin"} {
+		response := newClient(t, url).request(t, fmt.Sprintf("bad-name-%d", index), "room.create", map[string]any{"name": name})
+		if response.Error == nil || response.Error.Code != "invalid_player" {
+			t.Fatalf("name %q = %+v", name, response)
+		}
+	}
+	accepted := newClient(t, url).request(t, "unicode-name", "room.create", map[string]any{"name": "Élodie 🐄"})
+	if accepted.Type != "snapshot" || accepted.Game.Public.Players[0].Name != "Élodie 🐄" {
+		t.Fatalf("unicode name = %+v", accepted)
+	}
+}
+
+func TestWebSocketResumeRevokesOlderConnectionForSamePlayer(t *testing.T) {
+	_, _, url := newTestServer(t, t.TempDir()+"/games.db")
+	room := newRoom(t, url)
+	started := room.start(t)
+	replacement := newClient(t, url)
+	resumed := replacement.request(t, "resume-host", "session.resume", room.hostSession)
+	if resumed.Type != "snapshot" || resumed.Game.Version != started.Game.Version {
+		t.Fatalf("resumed session = %+v", resumed)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if response, err := room.host.do(ctx, "stale-action", "turn.auction", nil); err == nil {
+		t.Fatalf("old connection remained active: %+v", response)
+	}
+	opened := replacement.request(t, "replacement-action", "turn.auction", nil)
+	if opened.Type != "snapshot" || opened.Game.Version != started.Game.Version+1 {
+		t.Fatalf("replacement action = %+v", opened)
+	}
+}
+
+func TestWebSocketRateLimitsCommandFlood(t *testing.T) {
+	_, _, url := newTestServer(t, t.TempDir()+"/games.db")
+	client := newClient(t, url)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rateLimited := false
+	for index := 0; index < 80; index++ {
+		response, err := client.do(ctx, fmt.Sprintf("flood-%d", index), "unknown", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.Error != nil && response.Error.Code == "rate_limited" {
+			rateLimited = true
+		}
+	}
+	if !rateLimited {
+		t.Fatal("command flood was not rate limited")
+	}
+}
+
+func TestWebSocketClosesOversizedMessagesAndRemainsHealthy(t *testing.T) {
+	_, _, url := newTestServer(t, t.TempDir()+"/games.db")
+	client := newClient(t, url)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	message := map[string]any{"id": "oversized", "type": "room.create", "payload": map[string]any{"name": strings.Repeat("a", 9000)}}
+	if err := wsjson.Write(ctx, client.connection, message); err != nil {
+		t.Fatal(err)
+	}
+	var response response
+	err := wsjson.Read(ctx, client.connection, &response)
+	if websocket.CloseStatus(err) != websocket.StatusMessageTooBig {
+		t.Fatalf("oversized message error = %v, response = %+v", err, response)
+	}
+	accepted := newClient(t, url).request(t, "healthy", "room.create", map[string]any{"name": "Alice"})
+	if accepted.Type != "snapshot" {
+		t.Fatalf("server after oversized message = %+v", accepted)
+	}
+}
+
+func TestWebSocketRejectsBinaryCommands(t *testing.T) {
+	_, _, url := newTestServer(t, t.TempDir()+"/games.db")
+	client := newClient(t, url)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	message := []byte(`{"id":"binary","type":"room.create","payload":{"name":"Alice"}}`)
+	if err := client.connection.Write(ctx, websocket.MessageBinary, message); err != nil {
+		t.Fatal(err)
+	}
+	var response response
+	err := wsjson.Read(ctx, client.connection, &response)
+	if websocket.CloseStatus(err) != websocket.StatusUnsupportedData {
+		t.Fatalf("binary message error = %v, response = %+v", err, response)
+	}
+	accepted := newClient(t, url).request(t, "healthy-text", "room.create", map[string]any{"name": "Alice"})
+	if accepted.Type != "snapshot" {
+		t.Fatalf("server after binary message = %+v", accepted)
+	}
+}
+
+func TestWebSocketRejectsCrossOriginBrowserConnection(t *testing.T) {
+	_, _, url := newTestServer(t, t.TempDir()+"/games.db")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	connection, response, err := websocket.Dial(ctx, url, &websocket.DialOptions{HTTPHeader: http.Header{"Origin": []string{"https://evil.example"}}})
+	if connection != nil {
+		connection.CloseNow()
+	}
+	if response != nil {
+		defer response.Body.Close()
+	}
+	if err == nil || response == nil || response.StatusCode != http.StatusForbidden {
+		t.Fatalf("cross-origin dial response=%v error=%v", response, err)
+	}
+}
+
+func TestWebSocketRejectsMalformedEnvelopesWithoutAffectingOtherClients(t *testing.T) {
+	_, _, url := newTestServer(t, t.TempDir()+"/games.db")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client := newClient(t, url)
+	for _, payload := range [][]byte{[]byte(`[]`), []byte(`"text"`), []byte(`{}`), []byte(`{"id":"first","id":"second","type":"room.create","payload":{"name":"Alice"}}`)} {
+		response, err := client.raw(ctx, payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.Error == nil || response.Error.Code != "invalid_request" {
+			t.Fatalf("malformed envelope %s = %+v", payload, response)
+		}
+	}
+	broken := newClient(t, url)
+	if err := broken.connection.Write(ctx, websocket.MessageText, []byte(`{"id":`)); err != nil {
+		t.Fatal(err)
+	}
+	var response response
+	err := wsjson.Read(ctx, broken.connection, &response)
+	if websocket.CloseStatus(err) != websocket.StatusInvalidFramePayloadData {
+		t.Fatalf("invalid JSON error = %v", err)
+	}
+	accepted := newClient(t, url).request(t, "after-malformed", "room.create", map[string]any{"name": "Alice"})
+	if accepted.Type != "snapshot" {
+		t.Fatalf("server after malformed clients = %+v", accepted)
+	}
+}
+
+func TestWebSocketRejectsUnauthenticatedGameCommandsAndForgedSessions(t *testing.T) {
+	_, _, url := newTestServer(t, t.TempDir()+"/games.db")
+	client := newClient(t, url)
+	expectError(t, client.request(t, "start", "game.start", nil), "unauthorized")
+	expectError(t, client.request(t, "join-fake", "room.join", map[string]any{"gameId": "game_000000000000000000000000", "name": "Mallory"}), "game_not_found")
+	expectError(t, client.request(t, "resume-fake", "session.resume", map[string]any{
+		"gameId": "game_000000000000000000000000", "playerId": "player_000000000000000000000000", "token": "session_000000000000000000000000000000000000000000000000",
+	}), "unauthorized")
+	created := client.request(t, "create-after-errors", "room.create", map[string]any{"name": "Alice"})
+	if created.Type != "snapshot" {
+		t.Fatalf("create after rejected attacks = %+v", created)
+	}
+}
+
+func TestWebSocketRejectsOutOfTurnAndFraudulentAuctionMoves(t *testing.T) {
+	_, _, url := newTestServer(t, t.TempDir()+"/games.db")
+	room := newRoom(t, url)
+	started := room.start(t)
+	expectError(t, room.bob.request(t, "bob-turn", "turn.auction", nil), "not_your_turn")
+	opened := room.host.request(t, "host-turn", "turn.auction", nil)
+	if opened.Game.Version != started.Game.Version+1 {
+		t.Fatalf("opened auction = %+v", opened)
+	}
+	expectError(t, room.host.request(t, "host-bid", "auction.bid", map[string]any{"amount": 10, "payment": game.Money{Ten: 1}}), "forbidden")
+	expectError(t, room.bob.request(t, "fake-money", "auction.bid", map[string]any{"amount": 10, "payment": game.Money{Ten: 5}}), "invalid_payment")
+	expectError(t, room.bob.request(t, "negative-money", "auction.bid", map[string]any{"amount": 10, "payment": game.Money{Ten: -1, Fifty: 1}}), "invalid_payment")
+	expectError(t, room.carol.request(t, "carol-close", "auction.close", nil), "forbidden")
+	accepted := room.bob.request(t, "bob-bid", "auction.bid", map[string]any{"amount": 10, "payment": game.Money{Ten: 1}})
+	if accepted.Game.Version != opened.Game.Version+1 {
+		t.Fatalf("accepted bid = %+v", accepted)
+	}
+	expectError(t, room.carol.request(t, "equal-bid", "auction.bid", map[string]any{"amount": 10, "payment": game.Money{Ten: 1}}), "bid_too_low")
+	closed := room.host.request(t, "host-close", "auction.close", nil)
+	expectError(t, room.bob.request(t, "bidder-resolve", "auction.resolve", map[string]any{"buy": false}), "forbidden")
+	expectError(t, room.host.request(t, "fake-buy", "auction.resolve", map[string]any{"buy": true, "payment": game.Money{Ten: 5}}), "invalid_payment")
+	settled := room.host.request(t, "decline", "auction.resolve", map[string]any{"buy": false})
+	if settled.Type != "snapshot" || settled.Game.Version != closed.Game.Version+1 || settled.Game.Public.TurnPlayerID != room.bobSession.PlayerID {
+		t.Fatalf("settled auction = %+v", settled)
+	}
+}
+
+func TestWebSocketRejectsForgedTradeMoves(t *testing.T) {
+	_, _, url := newTestServer(t, t.TempDir()+"/games.db")
+	room := newRoom(t, url)
+	_, challengerID, targetID, animal := room.reachTrade(t, "fraud")
+	thirdID := ""
+	for playerID := range room.clients {
+		if playerID != challengerID && playerID != targetID {
+			thirdID = playerID
+		}
+	}
+	expectError(t, room.clients[targetID].request(t, "wrong-turn-trade", "turn.trade", map[string]any{"targetId": challengerID, "animal": animal, "offer": game.Money{Zero: 1}}), "not_your_turn")
+	expectError(t, room.clients[challengerID].request(t, "self-trade", "turn.trade", map[string]any{"targetId": challengerID, "animal": animal, "offer": game.Money{Zero: 1}}), "invalid_target")
+	expectError(t, room.clients[challengerID].request(t, "fake-target", "turn.trade", map[string]any{"targetId": "player_fake", "animal": animal, "offer": game.Money{Zero: 1}}), "invalid_target")
+	expectError(t, room.clients[challengerID].request(t, "fake-animal", "turn.trade", map[string]any{"targetId": targetID, "animal": "dragon", "offer": game.Money{Zero: 1}}), "invalid_trade")
+	expectError(t, room.clients[challengerID].request(t, "fake-offer", "turn.trade", map[string]any{"targetId": targetID, "animal": animal, "offer": game.Money{Zero: 3}}), "invalid_payment")
+	started := room.clients[challengerID].request(t, "valid-trade", "turn.trade", map[string]any{"targetId": targetID, "animal": animal, "offer": game.Money{Zero: 1}})
+	if started.Type != "snapshot" || started.Game.Public.Phase != game.PhaseTradeResponse {
+		t.Fatalf("valid trade = %+v", started)
+	}
+	expectError(t, room.clients[challengerID].request(t, "self-accept", "trade.accept", nil), "forbidden")
+	expectError(t, room.clients[thirdID].request(t, "third-accept", "trade.accept", nil), "forbidden")
+	expectError(t, room.clients[targetID].request(t, "fake-counter", "trade.counter", map[string]any{"offer": game.Money{Zero: 3}}), "invalid_payment")
+	accepted := room.clients[targetID].request(t, "valid-accept", "trade.accept", nil)
+	if accepted.Type != "snapshot" || accepted.Game.Version != started.Game.Version+1 {
+		t.Fatalf("valid accept = %+v", accepted)
+	}
+	expectError(t, room.clients[targetID].request(t, "double-accept", "trade.accept", nil), "invalid_phase")
+}
+
 type testRoom struct {
 	host         *testClient
 	bob          *testClient
@@ -459,6 +770,17 @@ func (client *testClient) do(ctx context.Context, id, messageType string, payloa
 	}
 }
 
+func (client *testClient) raw(ctx context.Context, message []byte) (response, error) {
+	if err := client.connection.Write(ctx, websocket.MessageText, message); err != nil {
+		return response{}, err
+	}
+	var response response
+	if err := wsjson.Read(ctx, client.connection, &response); err != nil {
+		return response, err
+	}
+	return response, nil
+}
+
 func (client *testClient) awaitVersion(t *testing.T, version uint64) response {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -501,4 +823,11 @@ func findTrade(public game.PublicView) (string, string, game.Animal) {
 		}
 	}
 	return "", "", ""
+}
+
+func expectError(t *testing.T, response response, code string) {
+	t.Helper()
+	if response.Type != "error" || response.Error == nil || response.Error.Code != code {
+		t.Fatalf("response = %+v, want error %q", response, code)
+	}
 }

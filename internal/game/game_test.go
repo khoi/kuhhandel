@@ -81,6 +81,24 @@ func TestStartDealsPrivateMoneyWithoutLeakingHiddenState(t *testing.T) {
 	}
 }
 
+func TestRoomEventStoresHashInsteadOfBearerToken(t *testing.T) {
+	token := "session-secret-that-must-not-enter-the-log"
+	aggregate := game.New("game-1")
+	event, err := aggregate.Decide("", game.CreateRoom{Player: game.Identity{ID: "p1", AuthHash: game.HashToken(token), Name: "Alice"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(event.Data), token) {
+		t.Fatalf("room event leaked bearer token: %s", event.Data)
+	}
+	if err := aggregate.Apply(event); err != nil {
+		t.Fatal(err)
+	}
+	if !aggregate.Authenticate("p1", token) || aggregate.Authenticate("p1", game.HashToken(token)) {
+		t.Fatal("authentication did not keep hash and token distinct")
+	}
+}
+
 func TestAuctionWithoutBidAwardsAnimalAndAdvancesTurn(t *testing.T) {
 	aggregate := startedGame(t, 31)
 	apply(t, aggregate, "p1", game.BeginAuction{})
@@ -201,7 +219,7 @@ func TestRoomRejectsSixthPlayerAndDuplicateIdentity(t *testing.T) {
 	apply(t, other, "", game.CreateRoom{Player: identity("p1", "Alice")})
 	_, err = other.Decide("", game.JoinRoom{Player: identity("p1", "Again")})
 	assertRuleError(t, err, "player_exists")
-	_, err = other.Decide("", game.JoinRoom{Player: game.Identity{ID: "new", Token: "p1-token", Name: "Again"}})
+	_, err = other.Decide("", game.JoinRoom{Player: game.Identity{ID: "new", AuthHash: game.HashToken("p1-token"), Name: "Again"}})
 	assertRuleError(t, err, "player_exists")
 }
 
@@ -440,7 +458,7 @@ func completeGame(t *testing.T, aggregate *game.Aggregate) {
 }
 
 func identity(id, name string) game.Identity {
-	return game.Identity{ID: id, Token: id + "-token", Name: name}
+	return game.Identity{ID: id, AuthHash: game.HashToken(id + "-token"), Name: name}
 }
 
 func startedGame(t *testing.T, seed uint64) *game.Aggregate {

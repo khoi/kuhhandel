@@ -2,10 +2,12 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
-	"strings"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
@@ -27,7 +29,11 @@ type client struct {
 	context    context.Context
 	cancel     context.CancelFunc
 	send       chan response
+	window     time.Time
+	messages   int
 }
+
+const maxMessageBytes = 8 << 10
 
 func New(databasePath string) (*Server, error) {
 	events, err := store.Open(databasePath)
@@ -98,7 +104,7 @@ func (server *Server) serveWebSocket(writer http.ResponseWriter, httpRequest *ht
 	if err != nil {
 		return
 	}
-	connection.SetReadLimit(64 << 10)
+	connection.SetReadLimit(maxMessageBytes)
 	clientContext, cancel := context.WithCancel(context.Background())
 	peer := &client{connection: connection, context: clientContext, cancel: cancel, send: make(chan response, 32)}
 	go peer.write()
@@ -109,12 +115,21 @@ func (server *Server) serveWebSocket(writer http.ResponseWriter, httpRequest *ht
 	}()
 	var currentSession *session
 	for {
-		var message request
-		if err := wsjson.Read(clientContext, connection, &message); err != nil {
+		payload, err := readPayload(clientContext, connection)
+		if err != nil {
 			return
 		}
-		if strings.TrimSpace(message.ID) == "" {
-			peer.enqueue(errorResponse("", "invalid_request", "request id is required"))
+		if !peer.allow(time.Now()) {
+			peer.enqueue(errorResponse(requestID(payload), "rate_limited", "too many requests"))
+			continue
+		}
+		var message request
+		if err := decodeRequest(payload, &message); err != nil {
+			peer.enqueue(responseForError(requestID(payload), err))
+			continue
+		}
+		if err := validateRequest(message); err != nil {
+			peer.enqueue(responseForError("", err))
 			continue
 		}
 		createdSession, err := server.handle(clientContext, peer, currentSession, message)
@@ -125,6 +140,26 @@ func (server *Server) serveWebSocket(writer http.ResponseWriter, httpRequest *ht
 			peer.enqueue(responseForError(message.ID, err))
 		}
 	}
+}
+
+func readPayload(ctx context.Context, connection *websocket.Conn) (json.RawMessage, error) {
+	messageType, reader, err := connection.Reader(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if messageType != websocket.MessageText {
+		connection.Close(websocket.StatusUnsupportedData, "text messages only")
+		return nil, fmt.Errorf("unsupported WebSocket message type %d", messageType)
+	}
+	payload, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, err
+	}
+	if !json.Valid(payload) {
+		connection.Close(websocket.StatusInvalidFramePayloadData, "invalid JSON")
+		return nil, fmt.Errorf("invalid JSON")
+	}
+	return payload, nil
 }
 
 func (server *Server) runtime(gameID string) *gameRuntime {
@@ -138,6 +173,12 @@ func (server *Server) attach(peer *client, current *session) {
 	defer server.mu.Unlock()
 	if server.connections[current.GameID] == nil {
 		server.connections[current.GameID] = map[*client]string{}
+	}
+	for attached, playerID := range server.connections[current.GameID] {
+		if attached != peer && playerID == current.PlayerID {
+			delete(server.connections[current.GameID], attached)
+			attached.cancel()
+		}
 	}
 	server.connections[current.GameID][peer] = current.PlayerID
 }
@@ -193,6 +234,18 @@ func (peer *client) enqueue(message response) {
 	default:
 		peer.cancel()
 	}
+}
+
+func (peer *client) allow(now time.Time) bool {
+	if peer.window.IsZero() || now.Sub(peer.window) >= time.Second {
+		peer.window = now
+		peer.messages = 0
+	}
+	if peer.messages >= 64 {
+		return false
+	}
+	peer.messages++
+	return true
 }
 
 func (peer *client) write() {

@@ -1,6 +1,9 @@
 package game
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -29,9 +32,9 @@ const (
 )
 
 type Identity struct {
-	ID    string `json:"id"`
-	Token string `json:"token"`
-	Name  string `json:"name"`
+	ID       string `json:"id"`
+	AuthHash string `json:"authHash"`
+	Name     string `json:"name"`
 }
 
 type Command interface {
@@ -276,7 +279,7 @@ func (a *Aggregate) Decide(actorID string, command Command) (Event, error) {
 			return Event{}, err
 		}
 		for _, player := range a.state.Players {
-			if player.ID == command.Player.ID || player.Token == command.Player.Token {
+			if player.ID == command.Player.ID || player.AuthHash == command.Player.AuthHash {
 				return Event{}, ruleError("player_exists", "player already joined")
 			}
 		}
@@ -677,7 +680,12 @@ func (a *Aggregate) Snapshot(playerID string) (Snapshot, error) {
 
 func (a *Aggregate) Authenticate(playerID, token string) bool {
 	index := a.playerIndex(playerID)
-	return index >= 0 && a.state.Players[index].Token == token
+	return index >= 0 && subtle.ConstantTimeCompare([]byte(a.state.Players[index].AuthHash), []byte(HashToken(token))) == 1
+}
+
+func HashToken(token string) string {
+	hash := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(hash[:])
 }
 
 func (a *Aggregate) requireTurn(actorID string) error {
@@ -798,8 +806,8 @@ func newEvent(version uint64, eventType string, data any) (Event, error) {
 }
 
 func validateIdentity(identity Identity) error {
-	if strings.TrimSpace(identity.ID) == "" || strings.TrimSpace(identity.Token) == "" || strings.TrimSpace(identity.Name) == "" {
-		return ruleError("invalid_player", "player id, token, and name are required")
+	if strings.TrimSpace(identity.ID) == "" || strings.TrimSpace(identity.AuthHash) == "" || strings.TrimSpace(identity.Name) == "" {
+		return ruleError("invalid_player", "player id, auth hash, and name are required")
 	}
 	return nil
 }

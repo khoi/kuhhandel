@@ -35,6 +35,8 @@ func run() error {
 		Addr:              *address,
 		Handler:           application.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    16 << 10,
 	}
 	errorsChannel := make(chan error, 1)
 	go func() {

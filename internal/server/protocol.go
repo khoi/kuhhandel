@@ -2,14 +2,11 @@ package server
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"strings"
 
 	"github.com/khoi/kuhhandel/internal/game"
+	"github.com/khoi/kuhhandel/internal/store"
 )
 
 type request struct {
@@ -49,7 +46,7 @@ func (server *Server) handle(ctx context.Context, peer *client, current *session
 		if err := decodePayload(message.Payload, &payload); err != nil {
 			return nil, err
 		}
-		identity, err := newIdentity(payload.Name)
+		identity, token, err := newIdentity(payload.Name)
 		if err != nil {
 			return nil, err
 		}
@@ -67,7 +64,7 @@ func (server *Server) handle(ctx context.Context, peer *client, current *session
 		server.mu.Lock()
 		server.games[gameID] = runtime
 		server.mu.Unlock()
-		created := &session{GameID: gameID, PlayerID: identity.ID, Token: identity.Token}
+		created := &session{GameID: gameID, PlayerID: identity.ID, Token: token}
 		server.attach(peer, created)
 		server.publish(ctx, gameID, peer, message.ID, created, &snapshot)
 		return created, nil
@@ -86,7 +83,7 @@ func (server *Server) handle(ctx context.Context, peer *client, current *session
 		if runtime == nil {
 			return nil, protocolError("game_not_found", "game does not exist")
 		}
-		identity, err := newIdentity(payload.Name)
+		identity, token, err := newIdentity(payload.Name)
 		if err != nil {
 			return nil, err
 		}
@@ -94,7 +91,7 @@ func (server *Server) handle(ctx context.Context, peer *client, current *session
 		if err != nil {
 			return nil, err
 		}
-		joined := &session{GameID: payload.GameID, PlayerID: identity.ID, Token: identity.Token}
+		joined := &session{GameID: payload.GameID, PlayerID: identity.ID, Token: token}
 		server.attach(peer, joined)
 		server.publish(ctx, payload.GameID, peer, message.ID, joined, &snapshot)
 		return joined, nil
@@ -122,12 +119,18 @@ func (server *Server) handle(ctx context.Context, peer *client, current *session
 		server.publish(ctx, payload.GameID, peer, message.ID, resumed, nil)
 		return resumed, nil
 	case "game.start":
+		if err := requireNoPayload(message.Payload); err != nil {
+			return nil, err
+		}
 		seed, err := randomSeed()
 		if err != nil {
 			return nil, err
 		}
 		return nil, server.execute(ctx, peer, current, message.ID, game.StartGame{Seed: seed})
 	case "turn.auction":
+		if err := requireNoPayload(message.Payload); err != nil {
+			return nil, err
+		}
 		return nil, server.execute(ctx, peer, current, message.ID, game.BeginAuction{})
 	case "auction.bid":
 		var payload struct {
@@ -139,6 +142,9 @@ func (server *Server) handle(ctx context.Context, peer *client, current *session
 		}
 		return nil, server.execute(ctx, peer, current, message.ID, game.PlaceBid{Amount: payload.Amount, Payment: payload.Payment})
 	case "auction.close":
+		if err := requireNoPayload(message.Payload); err != nil {
+			return nil, err
+		}
 		return nil, server.execute(ctx, peer, current, message.ID, game.CloseAuction{})
 	case "auction.resolve":
 		var payload struct {
@@ -160,6 +166,9 @@ func (server *Server) handle(ctx context.Context, peer *client, current *session
 		}
 		return nil, server.execute(ctx, peer, current, message.ID, game.BeginTrade{TargetID: payload.TargetID, Animal: payload.Animal, Offer: payload.Offer})
 	case "trade.accept":
+		if err := requireNoPayload(message.Payload); err != nil {
+			return nil, err
+		}
 		return nil, server.execute(ctx, peer, current, message.ID, game.AcceptTrade{})
 	case "trade.counter":
 		var payload struct {
@@ -198,48 +207,6 @@ func (server *Server) execute(ctx context.Context, peer *client, current *sessio
 	return nil
 }
 
-func newIdentity(name string) (game.Identity, error) {
-	name = strings.TrimSpace(name)
-	if name == "" || len(name) > 50 {
-		return game.Identity{}, protocolError("invalid_player", "name must contain 1 to 50 bytes")
-	}
-	playerID, err := randomID("player_", 12)
-	if err != nil {
-		return game.Identity{}, err
-	}
-	token, err := randomID("session_", 24)
-	if err != nil {
-		return game.Identity{}, err
-	}
-	return game.Identity{ID: playerID, Token: token, Name: name}, nil
-}
-
-func randomID(prefix string, size int) (string, error) {
-	bytes := make([]byte, size)
-	if _, err := rand.Read(bytes); err != nil {
-		return "", err
-	}
-	return prefix + hex.EncodeToString(bytes), nil
-}
-
-func randomSeed() (uint64, error) {
-	var bytes [8]byte
-	if _, err := rand.Read(bytes[:]); err != nil {
-		return 0, err
-	}
-	return binary.LittleEndian.Uint64(bytes[:]), nil
-}
-
-func decodePayload(payload json.RawMessage, target any) error {
-	if len(payload) == 0 || string(payload) == "null" {
-		return protocolError("invalid_request", "payload is required")
-	}
-	if err := json.Unmarshal(payload, target); err != nil {
-		return protocolError("invalid_request", "payload is invalid")
-	}
-	return nil
-}
-
 func responseForError(requestID string, err error) response {
 	var rule *game.RuleError
 	var protocol *responseError
@@ -248,6 +215,8 @@ func responseForError(requestID string, err error) response {
 		return errorResponse(requestID, rule.Code, rule.Message)
 	case errors.As(err, &protocol):
 		return errorResponse(requestID, protocol.Code, protocol.Message)
+	case errors.Is(err, store.ErrDuplicateCommand):
+		return errorResponse(requestID, "duplicate_request", "request id was already used")
 	default:
 		return errorResponse(requestID, "internal", "internal server error")
 	}
