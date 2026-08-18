@@ -1,7 +1,7 @@
 package strategy
 
 import (
-	"sort"
+	"sync"
 
 	"github.com/khoi/kuhhandel/internal/game"
 )
@@ -10,6 +10,20 @@ type paymentOption struct {
 	money game.Money
 	total int
 	cards int
+}
+
+type paymentWorkspace struct {
+	current map[int]paymentOption
+	next    map[int]paymentOption
+}
+
+var paymentWorkspaces = sync.Pool{
+	New: func() any {
+		return &paymentWorkspace{
+			current: map[int]paymentOption{},
+			next:    map[int]paymentOption{},
+		}
+	},
 }
 
 func paymentAtLeast(available game.Money, minimum, maximum int) (game.Money, int, bool) {
@@ -49,7 +63,10 @@ func smallestOffer(available game.Money) game.Money {
 }
 
 func paymentOptions(available game.Money) []paymentOption {
-	options := map[int]paymentOption{0: {}}
+	workspace := paymentWorkspaces.Get().(*paymentWorkspace)
+	clear(workspace.current)
+	clear(workspace.next)
+	workspace.current[0] = paymentOption{}
 	denominations := []struct {
 		value int
 		count int
@@ -62,31 +79,31 @@ func paymentOptions(available game.Money) []paymentOption {
 		{500, available.FiveHundred, func(money game.Money, count int) game.Money { money.FiveHundred += count; return money }},
 	}
 	for _, denomination := range denominations {
-		next := make(map[int]paymentOption, len(options)*(denomination.count+1))
-		for total, option := range options {
+		clear(workspace.next)
+		for total, option := range workspace.current {
 			for count := 0; count <= denomination.count; count++ {
 				candidate := paymentOption{
 					money: denomination.add(option.money, count),
 					total: total + denomination.value*count,
 					cards: option.cards + count,
 				}
-				current, exists := next[candidate.total]
+				current, exists := workspace.next[candidate.total]
 				if !exists || betterPayment(candidate, current) {
-					next[candidate.total] = candidate
+					workspace.next[candidate.total] = candidate
 				}
 			}
 		}
-		options = next
+		workspace.current, workspace.next = workspace.next, workspace.current
 	}
-	ordered := make([]paymentOption, 0, len(options)-1)
-	for total, option := range options {
-		if total > 0 {
+	ordered := make([]paymentOption, 0, len(workspace.current)-1)
+	for total := denominations[0].value; total <= moneyTotal(available); total += denominations[0].value {
+		if option, ok := workspace.current[total]; ok {
 			ordered = append(ordered, option)
 		}
 	}
-	sort.Slice(ordered, func(first, second int) bool {
-		return ordered[first].total < ordered[second].total
-	})
+	clear(workspace.current)
+	clear(workspace.next)
+	paymentWorkspaces.Put(workspace)
 	return ordered
 }
 
