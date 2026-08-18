@@ -9,7 +9,15 @@ uv sync --project learning --python 3.11
 uv run --project learning kuhhandel-learn --players 3 --steps 100 --batch-seeds 32
 ```
 
-The trainer starts from the matching champion policy. It selects checkpoints on one fixed seed range, then reports one result on a separate held-out range. Checkpoints go to `learning/checkpoints` by default.
+The trainer starts from the matching heuristic guide. It selects checkpoints on one fixed seed range, then reports one result on a separate held-out range. Checkpoints go to `learning/checkpoints` by default.
+
+Train a reply to a saved policy while starting from that policy:
+
+```sh
+uv run --project learning kuhhandel-learn --players 3 --initial learning/models/three-player.json --opponent learning/models/three-player.json --exclude-guide
+```
+
+Repeat `--opponent` to train against several saved policies. The worker balances them across opponent seats and shuffle seeds. The heuristic guide stays in the pool unless `--exclude-guide` is set. `--initial` accepts an exported JSON model or a PyTorch checkpoint.
 
 Evaluate the saved research models:
 

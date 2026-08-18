@@ -8,7 +8,16 @@ from pathlib import Path
 
 import torch
 
-from kuhhandel_learning.train import Rollout, RolloutWorker, load_model, parser, policy_gradient, train
+from kuhhandel_learning.train import (
+    Rollout,
+    RolloutWorker,
+    initial_weights,
+    load_model,
+    opponent_pool,
+    parser,
+    policy_gradient,
+    train,
+)
 
 
 class TrainerTests(unittest.TestCase):
@@ -58,6 +67,13 @@ class TrainerTests(unittest.TestCase):
             self.assertEqual(result.games, 3)
             self.assertEqual(load_model(arguments.checkpoint, 3).shape, (5, 16))
             self.assertEqual(load_model(arguments.export, 3).shape, (5, 16))
+            opponents = opponent_pool([arguments.export], 3, (5, 16), True)
+            self.assertEqual(len(opponents), 2)
+            self.assertEqual(torch.count_nonzero(opponents[0]), 0)
+            self.assertEqual(torch.count_nonzero(initial_weights(None, 3, (5, 16))), 0)
+            self.assertTrue(torch.equal(initial_weights(arguments.export, 3, (5, 16)), opponents[1]))
+            with self.assertRaises(RuntimeError):
+                opponent_pool([], 3, (5, 16), False)
             with self.assertRaises(RuntimeError):
                 load_model(arguments.export, 5)
 

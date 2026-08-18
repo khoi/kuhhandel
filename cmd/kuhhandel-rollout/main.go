@@ -11,12 +11,13 @@ import (
 )
 
 type request struct {
-	Kind    string      `json:"kind"`
-	Players int         `json:"players"`
-	Seeds   int         `json:"seeds"`
-	Seed    uint64      `json:"seed"`
-	Sample  bool        `json:"sample"`
-	Weights [][]float64 `json:"weights"`
+	Kind      string        `json:"kind"`
+	Players   int           `json:"players"`
+	Seeds     int           `json:"seeds"`
+	Seed      uint64        `json:"seed"`
+	Sample    bool          `json:"sample"`
+	Weights   [][]float64   `json:"weights"`
+	Opponents [][][]float64 `json:"opponents"`
 }
 
 type response struct {
@@ -72,12 +73,21 @@ func handle(request request) response {
 		result.Error = err.Error()
 		return result
 	}
+	opponents := make([]strategy.LinearModel, len(request.Opponents))
+	for index, weights := range request.Opponents {
+		opponents[index], err = strategy.NewLinearModel(weights)
+		if err != nil {
+			result.Error = fmt.Sprintf("opponent %d: %s", index, err)
+			return result
+		}
+	}
 	rolled, err := strategy.Rollout(strategy.RolloutOptions{
-		Model:   model,
-		Players: request.Players,
-		Seeds:   request.Seeds,
-		Seed:    request.Seed,
-		Sample:  request.Sample,
+		Model:          model,
+		OpponentModels: opponents,
+		Players:        request.Players,
+		Seeds:          request.Seeds,
+		Seed:           request.Seed,
+		Sample:         request.Sample,
 	})
 	if err != nil {
 		result.Error = err.Error()

@@ -71,6 +71,7 @@ class RolloutWorker:
         seeds: int,
         seed: int,
         sample: bool,
+        opponents: list[torch.Tensor] | None = None,
     ) -> Rollout:
         payload = self._request(
             {
@@ -80,6 +81,7 @@ class RolloutWorker:
                 "seed": seed,
                 "sample": sample,
                 "weights": weights.detach().cpu().tolist(),
+                "opponents": [opponent.detach().cpu().tolist() for opponent in opponents or []],
             }
         )
         return Rollout.from_payload(payload)
@@ -138,18 +140,25 @@ def train(arguments: argparse.Namespace) -> Rollout:
     root = repository_root(arguments.root)
     with RolloutWorker(root, arguments.go) as worker:
         decisions, features = worker.shape()
-        weights = torch.nn.Parameter(torch.zeros((decisions, features), dtype=torch.float64))
+        shape = (decisions, features)
+        weights = torch.nn.Parameter(initial_weights(arguments.initial, arguments.players, shape))
+        opponents = opponent_pool(
+            arguments.opponent,
+            arguments.players,
+            shape,
+            not arguments.exclude_guide,
+        )
         optimizer = torch.optim.Adam([weights], lr=arguments.learning_rate)
         baseline = 1 / arguments.players
         validation_seed = arguments.seed + arguments.steps * arguments.batch_seeds
         held_out_seed = validation_seed + arguments.eval_seeds
         best_weights = weights.detach().clone()
         best_step = 0
-        best = worker.rollout(best_weights, arguments.players, arguments.eval_seeds, validation_seed, False)
+        best = worker.rollout(best_weights, arguments.players, arguments.eval_seeds, validation_seed, False, opponents)
         print_result("checkpoint 0", best)
         for step in range(1, arguments.steps + 1):
             training_seed = arguments.seed + (step - 1) * arguments.batch_seeds
-            rollout = worker.rollout(weights, arguments.players, arguments.batch_seeds, training_seed, True)
+            rollout = worker.rollout(weights, arguments.players, arguments.batch_seeds, training_seed, True, opponents)
             gradient = policy_gradient(rollout, baseline, weights)
             optimizer.zero_grad(set_to_none=True)
             weights.grad = -gradient
@@ -158,13 +167,27 @@ def train(arguments: argparse.Namespace) -> Rollout:
             baseline += arguments.baseline_rate * (rollout.mean_reward - baseline)
             if step % arguments.eval_every != 0 and step != arguments.steps:
                 continue
-            evaluated = worker.rollout(weights, arguments.players, arguments.eval_seeds, validation_seed, False)
+            evaluated = worker.rollout(
+                weights,
+                arguments.players,
+                arguments.eval_seeds,
+                validation_seed,
+                False,
+                opponents,
+            )
             print_result(f"checkpoint {step}", evaluated)
             if evaluated.mean_reward > best.mean_reward:
                 best = evaluated
                 best_weights = weights.detach().clone()
                 best_step = step
-        held_out = worker.rollout(best_weights, arguments.players, arguments.held_out_seeds, held_out_seed, False)
+        held_out = worker.rollout(
+            best_weights,
+            arguments.players,
+            arguments.held_out_seeds,
+            held_out_seed,
+            False,
+            opponents,
+        )
         print_result("held-out", held_out)
         save_checkpoint(arguments.checkpoint, best_weights, arguments.players, best_step, best)
         if arguments.export is not None:
@@ -179,7 +202,13 @@ def evaluate(arguments: argparse.Namespace) -> Rollout:
         decisions, features = worker.shape()
         if weights.shape != (decisions, features):
             raise RuntimeError(f"model shape {tuple(weights.shape)} does not match {(decisions, features)}")
-        result = worker.rollout(weights, arguments.players, arguments.held_out_seeds, arguments.seed, False)
+        opponents = opponent_pool(
+            arguments.opponent,
+            arguments.players,
+            (decisions, features),
+            not arguments.exclude_guide,
+        )
+        result = worker.rollout(weights, arguments.players, arguments.held_out_seeds, arguments.seed, False, opponents)
     print_result("evaluation", result)
     return result
 
@@ -231,10 +260,36 @@ def load_model(path: Path, players: int) -> torch.Tensor:
     return torch.tensor(payload.get("weights"), dtype=torch.float64)
 
 
+def opponent_pool(
+    paths: list[Path],
+    players: int,
+    shape: tuple[int, int],
+    include_guide: bool,
+) -> list[torch.Tensor]:
+    opponents = [torch.zeros(shape, dtype=torch.float64)] if include_guide else []
+    for path in paths:
+        model = load_model(path, players)
+        if model.shape != shape:
+            raise RuntimeError(f"opponent shape {tuple(model.shape)} does not match {tuple(shape)}")
+        opponents.append(model)
+    if not opponents:
+        raise RuntimeError("opponent pool is empty")
+    return opponents
+
+
+def initial_weights(path: Path | None, players: int, shape: tuple[int, int]) -> torch.Tensor:
+    if path is None:
+        return torch.zeros(shape, dtype=torch.float64)
+    weights = load_model(path, players)
+    if weights.shape != shape:
+        raise RuntimeError(f"model shape {tuple(weights.shape)} does not match {shape}")
+    return weights
+
+
 def print_result(label: str, rollout: Rollout) -> None:
     deviations = ",".join(f"{count:.2f}" for count in rollout.mean_deviations)
     reward = f"{rollout.mean_reward * 100:.1f}% +/- {rollout.standard_error * 100:.1f}%"
-    print(f"{label}: {reward} deviations [{deviations}]")
+    print(f"{label}: {reward} deviations [{deviations}]", flush=True)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -252,6 +307,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--checkpoint", type=Path, default=Path("learning/checkpoints/best.pt"))
     result.add_argument("--export", type=Path)
     result.add_argument("--evaluate", type=Path)
+    result.add_argument("--initial", type=Path)
+    result.add_argument("--opponent", type=Path, action="append", default=[])
+    result.add_argument("--exclude-guide", action="store_true")
     result.add_argument("--root", type=Path, default=Path.cwd())
     result.add_argument("--go", default="go")
     return result

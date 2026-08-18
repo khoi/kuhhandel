@@ -38,6 +38,7 @@ func TestHandleRejectsInvalidRequests(t *testing.T) {
 		{Kind: "rollout", Players: 2, Seeds: 1},
 		{Kind: "rollout", Players: 3, Seeds: 0},
 		{Kind: "rollout", Players: 3, Seeds: 1, Weights: [][]float64{{1}}},
+		{Kind: "rollout", Players: 3, Seeds: 1, Opponents: [][][]float64{{{1}}}},
 	} {
 		if result := handle(request); result.Error == "" {
 			t.Fatalf("request succeeded: %+v", request)

@@ -8,11 +8,12 @@ import (
 )
 
 type RolloutOptions struct {
-	Model   LinearModel
-	Players int
-	Seeds   int
-	Seed    uint64
-	Sample  bool
+	Model          LinearModel
+	OpponentModels []LinearModel
+	Players        int
+	Seeds          int
+	Seed           uint64
+	Sample         bool
 }
 
 type RolloutResult struct {
@@ -64,6 +65,10 @@ func Rollout(options RolloutOptions) (RolloutResult, error) {
 
 func rolloutSeed(options RolloutOptions, deckSeed uint64) rolloutSeedResult {
 	result := rolloutSeedResult{}
+	opponents := options.OpponentModels
+	if len(opponents) == 0 {
+		opponents = []LinearModel{{}}
+	}
 	guide := LargeGameChampion()
 	if options.Players == 3 {
 		guide = ThreePlayerChampion()
@@ -77,7 +82,8 @@ func rolloutSeed(options RolloutOptions, deckSeed uint64) rolloutSeedResult {
 				challenger = NewLinear(options.Model, guide, policySeed, options.Sample)
 				policies[seat] = challenger
 			} else {
-				policies[seat] = NewHeuristic(guide, policySeed)
+				index := (int(deckSeed%uint64(len(opponents))) + challengerSeat + seat) % len(opponents)
+				policies[seat] = NewLinear(opponents[index], guide, policySeed, false)
 			}
 		}
 		played, err := Play(deckSeed, policies)

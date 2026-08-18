@@ -39,6 +39,28 @@ func TestSampledLinearPolicyReturnsGradients(t *testing.T) {
 	}
 }
 
+func TestRolloutWithMixedOpponentsIsDeterministic(t *testing.T) {
+	opponent := LinearModel{}
+	opponent.Weights[linearTurnDecision][0] = 1
+	options := RolloutOptions{
+		OpponentModels: []LinearModel{{}, opponent},
+		Players:        3,
+		Seeds:          5,
+		Seed:           950,
+	}
+	first, err := Rollout(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := Rollout(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(first, second) {
+		t.Fatal("mixed rollout is not deterministic")
+	}
+}
+
 func TestNewLinearModelValidatesShapeAndValues(t *testing.T) {
 	valid := make([][]float64, LinearDecisionCount)
 	for decision := range valid {

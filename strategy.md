@@ -12,7 +12,7 @@ The best policies found use the same core plan:
 6. Do not use routine zero-card offers. Keep offer size uncertain instead.
 7. After the deck ends, prefer a trade that completes a set, then one between equal holdings.
 
-Policy-gradient training found stronger replies for three and five players. Use the saved learned policy for those player counts and the heuristic champion for four players. These are empirical results against the policies tested. They are not a solved equilibrium.
+Policy-gradient training and self-play found stronger replies for three and five players. Use the saved learned policy for those player counts and the heuristic champion for four players. A new three-player reply replaced the first learned policy. New replies could not exploit that replacement or the five-player policy. These are empirical results against the policies tested. They are not a solved equilibrium.
 
 ## Valuation
 
@@ -43,7 +43,7 @@ Under the server rules, a target holding a zero card should counter with zero in
 
 ## Evidence
 
-The experiments completed more than 380,000 games. Each comparison rotates the challenger through every seat. Every challenger policy faces the same shuffle seeds and policy random streams for a given opponent. A table cell measures one challenger against copies of the column policy.
+The experiments completed more than 500,000 games. Each comparison rotates the challenger through every seat. Every challenger policy faces the same shuffle seeds and policy random streams for a given opponent. A table cell measures one challenger against copies of the column policy.
 
 The broad policy comparison found auction-first play best:
 
@@ -75,11 +75,15 @@ PyTorch policy-gradient training then searched beyond the fixed heuristic parame
 
 | Players | Learned share | Standard error | Equal-policy share | Result |
 | ---: | ---: | ---: | ---: | --- |
-| 3 | 40.9% | 0.8% | 33.3% | confirmed reply |
+| 3 | 42.1% | 0.8% | 33.3% | confirmed reply |
 | 4 | 24.9% | 0.4% | 25.0% | no gain |
 | 5 | 22.4% | 0.5% | 20.0% | confirmed reply |
 
-The three-player policy changes a mean 1.10 turn choices and 0.29 bids per game from its guide. The five-player policy changes 0.52 turn choices, 0.22 bids, and 0.38 first-refusal choices. Neither learned policy changes trade responses or second offers under the fixed evaluation margin.
+Iterative self-play then trained replies against saved models and balanced model pools. The replacement three-player policy scored 33.6% ± 0.7% against the first learned policy on 1,000 new shuffle seeds, then scored 42.1% ± 0.8% against the heuristic guide. A fresh reply from the guide scored 28.6% ± 1.1% against the replacement. A warm-start reply kept the replacement unchanged at its 33.3% self-play share.
+
+For five players, a new reply from the guide scored 19.6% ± 0.7% against the saved policy. A warm-start reply kept the saved policy unchanged at its 20.0% self-play share. A longer four-player run also kept the heuristic guide unchanged at 25.0%.
+
+The replacement three-player policy changes a mean 2.15 turn choices and 0.05 bids per game from its guide. The five-player policy changes 0.52 turn choices, 0.22 bids, and 0.38 first-refusal choices against its guide. Neither learned policy changes trade responses or second offers under the fixed evaluation margin.
 
 ## Model
 
@@ -94,7 +98,7 @@ The server permits bids and auction closure without a bidder turn. The research 
 
 The policy sees only its snapshot: public state, its money, and its legal actions. It never sees other money, hidden offers, or deck order.
 
-The learned policy scores a compact set of legal actions from 16 visible features. It starts from the matching heuristic guide, explores 2% of decisions during training, and replaces a guide move only when its learned score clears a fixed margin. Python updates the 80 weights with Adam. The Go worker keeps all rule use and full-game simulation on the Go side of one persistent JSON stream.
+The learned policy scores a compact set of legal actions from 16 visible features. It starts from the matching heuristic guide or a saved model, explores 2% of decisions during training, and replaces a guide move only when its learned score clears a fixed margin. Python updates the 80 weights with Adam. The Go worker keeps all rule use and full-game simulation on the Go side of one persistent JSON stream. Opponent pools may contain the guide and any number of saved models. Go balances the pool across seats and shuffle seeds.
 
 ## Reproduce
 
@@ -108,6 +112,8 @@ go run ./cmd/kuhhandel-strategy -suite search -samples 128 -policy search-028 -o
 uv sync --project learning --python 3.11
 uv run --project learning kuhhandel-learn --players 3 --steps 100 --batch-seeds 16 --eval-every 20 --eval-seeds 100 --held-out-seeds 300 --seed 6400000 --export learning/models/three-player.json
 uv run --project learning kuhhandel-learn --players 5 --steps 100 --batch-seeds 16 --eval-every 20 --eval-seeds 100 --held-out-seeds 300 --seed 6700000 --export learning/models/five-player.json
+uv run --project learning kuhhandel-learn --players 3 --steps 150 --batch-seeds 24 --eval-every 30 --eval-seeds 150 --held-out-seeds 500 --seed 8600000 --initial learning/models/three-player.json --opponent learning/models/three-player.json --exclude-guide
+uv run --project learning kuhhandel-learn --players 5 --steps 120 --batch-seeds 20 --eval-every 30 --eval-seeds 120 --held-out-seeds 400 --seed 8800000 --initial learning/models/five-player.json --opponent learning/models/five-player.json --exclude-guide
 uv run --project learning kuhhandel-learn --players 3 --evaluate learning/models/three-player.json --held-out-seeds 1000 --seed 6500000
 uv run --project learning kuhhandel-learn --players 5 --evaluate learning/models/five-player.json --held-out-seeds 1000 --seed 6900000
 ```
@@ -115,9 +121,8 @@ uv run --project learning kuhhandel-learn --players 5 --evaluate learning/models
 ## Limits
 
 - The result applies to the implemented second-edition rules and the discrete auction schedule above.
-- The opponent pool contains parameterized heuristic policies, not all possible policies.
-- The learned replies optimize against copies of one heuristic champion, not a mixed or adapting field.
-- The learned action scorer is linear and begins from the heuristic guide. It does not test every policy form.
+- The opponent pool contains the heuristic guide and saved linear policies, not all possible policies.
+- The learned action scorer is linear. It does not test every policy form.
 - The policy tracks only whether it already made an optional trade at the current deck count. It does not infer hidden money from history.
 - No current result proves a Nash equilibrium or a globally best strategy.
-- The next strong test is iterative self-play against a mixture of the heuristic and learned policies.
+- The next strong test is a policy that can use action history and non-linear feature interactions.
