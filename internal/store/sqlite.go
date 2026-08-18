@@ -156,6 +156,35 @@ func (store *SQLite) GameIDs(ctx context.Context) ([]string, error) {
 	return gameIDs, rows.Err()
 }
 
+func (store *SQLite) RecentGameIDs(ctx context.Context, limit, offset int) ([]string, bool, error) {
+	rows, err := store.database.QueryContext(ctx, `
+		SELECT game_id
+		FROM game_events
+		GROUP BY game_id
+		ORDER BY MAX(occurred_at) DESC, game_id
+		LIMIT ? OFFSET ?`, limit+1, offset)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	gameIDs := make([]string, 0, limit+1)
+	for rows.Next() {
+		var gameID string
+		if err := rows.Scan(&gameID); err != nil {
+			return nil, false, err
+		}
+		gameIDs = append(gameIDs, gameID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	hasMore := len(gameIDs) > limit
+	if hasMore {
+		gameIDs = gameIDs[:limit]
+	}
+	return gameIDs, hasMore, nil
+}
+
 func (store *SQLite) Close() error {
 	return store.database.Close()
 }

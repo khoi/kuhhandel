@@ -12,6 +12,15 @@ Health check: `GET /health`
 
 WebSocket: `GET /ws`
 
+Game archive: `GET /`
+
+The archive lists recorded games and replays every public move. It has search, step, scrub, play, speed, and keyboard controls. It never sends money, offers, session data, command IDs, or shuffle seeds.
+
+History API:
+
+- `GET /api/history?offset=0` returns 30 recent games and a `hasMore` flag.
+- `GET /api/history/{gameId}` returns the public replay frames for one game.
+
 Python clients can use the typed async [SDK](sdk/python/README.md).
 
 ## Messages

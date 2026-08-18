@@ -575,31 +575,18 @@ func (a *Aggregate) Apply(event Event) error {
 }
 
 func (a *Aggregate) Snapshot(playerID string) (Snapshot, error) {
-	self := -1
-	players := make([]PublicPlayer, len(a.state.Players))
-	for index, player := range a.state.Players {
-		playerAnimals := make(map[Animal]int, len(player.Animals))
-		for animal, count := range player.Animals {
-			playerAnimals[animal] = count
-		}
-		players[index] = PublicPlayer{ID: player.ID, Name: player.Name, Seat: index, Animals: playerAnimals, Score: Score(playerAnimals)}
-		if player.ID == playerID {
-			self = index
-		}
-	}
+	public, self := a.publicView(playerID)
 	if self == -1 {
 		return Snapshot{}, ruleError("not_a_player", "player is not in this game")
 	}
-	turnPlayerID := ""
 	legalActions := []string{}
 	var bidPayment *Money
 	var ownOffer *Money
 	if a.state.Status == StatusPlaying && len(a.state.Players) > 0 {
-		turnPlayerID = a.state.Players[a.state.Turn].ID
-		if turnPlayerID == playerID && a.state.Phase == PhaseTurn && a.state.DeckPos < len(a.state.Deck) {
+		if public.TurnPlayerID == playerID && a.state.Phase == PhaseTurn && a.state.DeckPos < len(a.state.Deck) {
 			legalActions = append(legalActions, "turn.auction")
 		}
-		if turnPlayerID == playerID && a.state.Phase == PhaseTurn && a.canTrade(self) {
+		if public.TurnPlayerID == playerID && a.state.Phase == PhaseTurn && a.canTrade(self) {
 			legalActions = append(legalActions, "turn.trade")
 		}
 		if a.state.Phase == PhaseAuction && a.state.Auction != nil && a.state.Auction.AuctioneerID == playerID {
@@ -628,6 +615,35 @@ func (a *Aggregate) Snapshot(playerID string) (Snapshot, error) {
 			offer := a.state.Trade.ChallengerOffer
 			ownOffer = &offer
 		}
+	}
+	return Snapshot{
+		Version: a.state.Version,
+		Public:  public,
+		Self:    SelfView{PlayerID: a.state.Players[self].ID, Money: a.state.Players[self].Money, LegalActions: legalActions, BidPayment: bidPayment, OwnOffer: ownOffer},
+	}, nil
+}
+
+func (a *Aggregate) Public() PublicView {
+	public, _ := a.publicView("")
+	return public
+}
+
+func (a *Aggregate) publicView(playerID string) (PublicView, int) {
+	self := -1
+	players := make([]PublicPlayer, len(a.state.Players))
+	for index, player := range a.state.Players {
+		playerAnimals := make(map[Animal]int, len(player.Animals))
+		for animal, count := range player.Animals {
+			playerAnimals[animal] = count
+		}
+		players[index] = PublicPlayer{ID: player.ID, Name: player.Name, Seat: index, Animals: playerAnimals, Score: Score(playerAnimals)}
+		if player.ID == playerID {
+			self = index
+		}
+	}
+	turnPlayerID := ""
+	if a.state.Status == StatusPlaying && len(a.state.Players) > 0 {
+		turnPlayerID = a.state.Players[a.state.Turn].ID
 	}
 	var auctionView *AuctionView
 	if a.state.Auction != nil {
@@ -660,22 +676,18 @@ func (a *Aggregate) Snapshot(playerID string) (Snapshot, error) {
 			}
 		}
 	}
-	return Snapshot{
-		Version: a.state.Version,
-		Public: PublicView{
-			GameID:        a.state.ID,
-			Status:        a.state.Status,
-			Phase:         a.state.Phase,
-			HostID:        a.state.HostID,
-			TurnPlayerID:  turnPlayerID,
-			Players:       players,
-			DeckRemaining: len(a.state.Deck) - a.state.DeckPos,
-			Auction:       auctionView,
-			Trade:         tradeView,
-			WinnerIDs:     winnerIDs,
-		},
-		Self: SelfView{PlayerID: a.state.Players[self].ID, Money: a.state.Players[self].Money, LegalActions: legalActions, BidPayment: bidPayment, OwnOffer: ownOffer},
-	}, nil
+	return PublicView{
+		GameID:        a.state.ID,
+		Status:        a.state.Status,
+		Phase:         a.state.Phase,
+		HostID:        a.state.HostID,
+		TurnPlayerID:  turnPlayerID,
+		Players:       players,
+		DeckRemaining: len(a.state.Deck) - a.state.DeckPos,
+		Auction:       auctionView,
+		Trade:         tradeView,
+		WinnerIDs:     winnerIDs,
+	}, self
 }
 
 func (a *Aggregate) Authenticate(playerID, token string) bool {

@@ -70,6 +70,11 @@ func New(databasePath string) (*Server, error) {
 
 func (server *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /", serveHistoryPage)
+	mux.HandleFunc("GET /app.css", serveHistoryCSS)
+	mux.HandleFunc("GET /app.js", serveHistoryJavaScript)
+	mux.HandleFunc("GET /api/history", server.serveHistoryList)
+	mux.HandleFunc("GET /api/history/{gameID}", server.serveHistoryReplay)
 	mux.HandleFunc("GET /health", func(writer http.ResponseWriter, _ *http.Request) {
 		writer.WriteHeader(http.StatusNoContent)
 	})
