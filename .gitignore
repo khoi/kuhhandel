@@ -1,1 +1,5 @@
 kuhhandel.db
+.venv/
+.ruff_cache/
+__pycache__/
+learning/checkpoints/

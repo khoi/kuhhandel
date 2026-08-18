@@ -33,6 +33,13 @@ go run ./cmd/kuhhandel-strategy -suite champions -opponents finalists -players 3
 
 [Strategy research](strategy.md) records the model, best policy found, evidence, and limits.
 
+Train a best response with PyTorch while Go runs the authoritative game engine:
+
+```sh
+uv sync --project learning --python 3.11
+uv run --project learning kuhhandel-learn --players 3
+```
+
 ## Messages
 
 Send:

@@ -125,15 +125,8 @@ func baseConfig() strategy.HeuristicConfig {
 }
 
 func championConfigs() []strategy.HeuristicConfig {
-	threePlayer := strategy.HeuristicConfig{
-		Name: "three-champion", AuctionFraction: 0.6, DenialFraction: 0.35, ReserveFraction: 0.3,
-		FirstRefusalFraction: 0.25, TradeFraction: 0.75, TradeAtDeckRemaining: 0, BluffChance: 0,
-	}
-	largeGame := variant(threePlayer, "large-champion", func(config *strategy.HeuristicConfig) {
-		config.DenialFraction = 0.65
-		config.FirstRefusalFraction = 0.35
-		config.TradeFraction = 1
-	})
+	threePlayer := strategy.ThreePlayerChampion()
+	largeGame := strategy.LargeGameChampion()
 	return []strategy.HeuristicConfig{threePlayer, largeGame}
 }
 

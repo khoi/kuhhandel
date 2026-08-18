@@ -27,6 +27,22 @@ type HeuristicConfig struct {
 	BluffChance          float64
 }
 
+func ThreePlayerChampion() HeuristicConfig {
+	return HeuristicConfig{
+		Name: "three-champion", AuctionFraction: 0.6, DenialFraction: 0.35, ReserveFraction: 0.3,
+		FirstRefusalFraction: 0.25, TradeFraction: 0.75, TradeAtDeckRemaining: 0, BluffChance: 0,
+	}
+}
+
+func LargeGameChampion() HeuristicConfig {
+	threePlayer := ThreePlayerChampion()
+	threePlayer.Name = "large-champion"
+	threePlayer.DenialFraction = 0.65
+	threePlayer.FirstRefusalFraction = 0.35
+	threePlayer.TradeFraction = 1
+	return threePlayer
+}
+
 type heuristic struct {
 	config             HeuristicConfig
 	random             *rand.Rand
