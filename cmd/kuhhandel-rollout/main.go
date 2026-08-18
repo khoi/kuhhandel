@@ -11,19 +11,22 @@ import (
 )
 
 type request struct {
-	Kind      string        `json:"kind"`
-	Players   int           `json:"players"`
-	Seeds     int           `json:"seeds"`
-	Seed      uint64        `json:"seed"`
-	Sample    bool          `json:"sample"`
-	Weights   [][]float64   `json:"weights"`
-	Opponents [][][]float64 `json:"opponents"`
+	Kind        string        `json:"kind"`
+	Players     int           `json:"players"`
+	Seeds       int           `json:"seeds"`
+	Seed        uint64        `json:"seed"`
+	Sample      bool          `json:"sample"`
+	Exploration float64       `json:"exploration"`
+	Weights     [][]float64   `json:"weights"`
+	Opponents   [][][]float64 `json:"opponents"`
 }
 
 type response struct {
 	Error          string      `json:"error,omitempty"`
 	Decisions      int         `json:"decisions"`
 	Features       int         `json:"features"`
+	Hidden         int         `json:"hidden"`
+	Parameters     int         `json:"parameters"`
 	Games          int         `json:"games,omitempty"`
 	MeanReward     float64     `json:"mean_reward"`
 	StandardError  float64     `json:"standard_error"`
@@ -60,7 +63,12 @@ func serve(input io.Reader, output io.Writer) error {
 }
 
 func handle(request request) response {
-	result := response{Decisions: strategy.LinearDecisionCount, Features: strategy.LinearFeatureCount}
+	result := response{
+		Decisions:  strategy.LearnedDecisionCount,
+		Features:   strategy.LearnedFeatureCount,
+		Hidden:     strategy.LearnedHiddenCount,
+		Parameters: strategy.LearnedParameterCount,
+	}
 	if request.Kind == "shape" {
 		return result
 	}
@@ -68,14 +76,14 @@ func handle(request request) response {
 		result.Error = fmt.Sprintf("unknown request kind %q", request.Kind)
 		return result
 	}
-	model, err := strategy.NewLinearModel(request.Weights)
+	model, err := strategy.NewLearnedModel(request.Weights)
 	if err != nil {
 		result.Error = err.Error()
 		return result
 	}
-	opponents := make([]strategy.LinearModel, len(request.Opponents))
+	opponents := make([]strategy.LearnedModel, len(request.Opponents))
 	for index, weights := range request.Opponents {
-		opponents[index], err = strategy.NewLinearModel(weights)
+		opponents[index], err = strategy.NewLearnedModel(weights)
 		if err != nil {
 			result.Error = fmt.Sprintf("opponent %d: %s", index, err)
 			return result
@@ -88,6 +96,7 @@ func handle(request request) response {
 		Seeds:          request.Seeds,
 		Seed:           request.Seed,
 		Sample:         request.Sample,
+		Exploration:    request.Exploration,
 	})
 	if err != nil {
 		result.Error = err.Error()
@@ -105,8 +114,8 @@ func handle(request request) response {
 	return result
 }
 
-func gradientRows(gradient strategy.LinearGradient) [][]float64 {
-	rows := make([][]float64, strategy.LinearDecisionCount)
+func gradientRows(gradient strategy.LearnedGradient) [][]float64 {
+	rows := make([][]float64, strategy.LearnedDecisionCount)
 	for decision := range rows {
 		rows[decision] = append([]float64(nil), gradient[decision][:]...)
 	}

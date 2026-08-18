@@ -8,12 +8,13 @@ import (
 )
 
 type RolloutOptions struct {
-	Model          LinearModel
-	OpponentModels []LinearModel
+	Model          LearnedModel
+	OpponentModels []LearnedModel
 	Players        int
 	Seeds          int
 	Seed           uint64
 	Sample         bool
+	Exploration    float64
 }
 
 type RolloutResult struct {
@@ -21,17 +22,17 @@ type RolloutResult struct {
 	MeanReward     float64
 	StandardError  float64
 	MeanDecisions  float64
-	MeanDeviations [LinearDecisionCount]float64
-	RewardGradient LinearGradient
-	MeanGradient   LinearGradient
+	MeanDeviations [LearnedDecisionCount]float64
+	RewardGradient LearnedGradient
+	MeanGradient   LearnedGradient
 }
 
 type rolloutSeedResult struct {
 	reward         float64
 	decisions      int
-	deviations     [LinearDecisionCount]int
-	rewardGradient LinearGradient
-	gradient       LinearGradient
+	deviations     [LearnedDecisionCount]int
+	rewardGradient *LearnedGradient
+	gradient       *LearnedGradient
 	err            error
 }
 
@@ -42,6 +43,9 @@ func Rollout(options RolloutOptions) (RolloutResult, error) {
 	if options.Seeds <= 0 {
 		return RolloutResult{}, fmt.Errorf("seed count must be positive")
 	}
+	if options.Exploration < 0 || options.Exploration > 1 {
+		return RolloutResult{}, fmt.Errorf("exploration must be between zero and one")
+	}
 	results := make([]rolloutSeedResult, options.Seeds)
 	jobs := make(chan int)
 	workers := min(options.Seeds, runtime.GOMAXPROCS(0))
@@ -51,7 +55,7 @@ func Rollout(options RolloutOptions) (RolloutResult, error) {
 		go func() {
 			defer group.Done()
 			for index := range jobs {
-				results[index] = rolloutSeed(options, options.Seed+uint64(index))
+				results[index] = rolloutSeed(&options, options.Seed+uint64(index))
 			}
 		}()
 	}
@@ -63,11 +67,15 @@ func Rollout(options RolloutOptions) (RolloutResult, error) {
 	return combineRollouts(results, options.Players)
 }
 
-func rolloutSeed(options RolloutOptions, deckSeed uint64) rolloutSeedResult {
+func rolloutSeed(options *RolloutOptions, deckSeed uint64) rolloutSeedResult {
 	result := rolloutSeedResult{}
+	if options.Sample {
+		result.rewardGradient = &LearnedGradient{}
+		result.gradient = &LearnedGradient{}
+	}
 	opponents := options.OpponentModels
 	if len(opponents) == 0 {
-		opponents = []LinearModel{{}}
+		opponents = []LearnedModel{{}}
 	}
 	guide := LargeGameChampion()
 	if options.Players == 3 {
@@ -75,15 +83,15 @@ func rolloutSeed(options RolloutOptions, deckSeed uint64) rolloutSeedResult {
 	}
 	for challengerSeat := range options.Players {
 		policies := make([]Policy, options.Players)
-		var challenger *LinearPolicy
+		var challenger *LearnedPolicy
 		for seat := range options.Players {
 			policySeed := deckSeed*uint64(options.Players+1) + uint64(seat+1)
 			if seat == challengerSeat {
-				challenger = NewLinear(options.Model, guide, policySeed, options.Sample)
+				challenger = NewLearned(&options.Model, guide, policySeed, options.Sample, options.Exploration)
 				policies[seat] = challenger
 			} else {
 				index := (int(deckSeed%uint64(len(opponents))) + challengerSeat + seat) % len(opponents)
-				policies[seat] = NewLinear(opponents[index], guide, policySeed, false)
+				policies[seat] = NewLearned(&opponents[index], guide, policySeed, false, 0)
 			}
 		}
 		played, err := Play(deckSeed, policies)
@@ -98,11 +106,13 @@ func rolloutSeed(options RolloutOptions, deckSeed uint64) rolloutSeedResult {
 		for decision, count := range deviations {
 			result.deviations[decision] += count
 		}
-		gradient := challenger.Gradient()
-		for decision := range LinearDecisionCount {
-			for feature := range LinearFeatureCount {
-				result.gradient[decision][feature] += gradient[decision][feature]
-				result.rewardGradient[decision][feature] += reward * gradient[decision][feature]
+		if options.Sample {
+			gradient := challenger.Gradient()
+			for decision := range LearnedDecisionCount {
+				for parameter := range LearnedParameterCount {
+					result.gradient[decision][parameter] += gradient[decision][parameter]
+					result.rewardGradient[decision][parameter] += reward * gradient[decision][parameter]
+				}
 			}
 		}
 	}
@@ -123,10 +133,12 @@ func combineRollouts(seeds []rolloutSeedResult, players int) (RolloutResult, err
 		for decision, count := range seed.deviations {
 			result.MeanDeviations[decision] += float64(count)
 		}
-		for decision := range LinearDecisionCount {
-			for feature := range LinearFeatureCount {
-				result.MeanGradient[decision][feature] += seed.gradient[decision][feature]
-				result.RewardGradient[decision][feature] += seed.rewardGradient[decision][feature]
+		if seed.gradient != nil {
+			for decision := range LearnedDecisionCount {
+				for parameter := range LearnedParameterCount {
+					result.MeanGradient[decision][parameter] += seed.gradient[decision][parameter]
+					result.RewardGradient[decision][parameter] += seed.rewardGradient[decision][parameter]
+				}
 			}
 		}
 	}
@@ -137,10 +149,10 @@ func combineRollouts(seeds []rolloutSeedResult, players int) (RolloutResult, err
 	for decision := range result.MeanDeviations {
 		result.MeanDeviations[decision] /= gameCount
 	}
-	for decision := range LinearDecisionCount {
-		for feature := range LinearFeatureCount {
-			result.MeanGradient[decision][feature] /= gameCount
-			result.RewardGradient[decision][feature] /= gameCount
+	for decision := range LearnedDecisionCount {
+		for parameter := range LearnedParameterCount {
+			result.MeanGradient[decision][parameter] /= gameCount
+			result.RewardGradient[decision][parameter] /= gameCount
 		}
 	}
 	if len(seeds) > 1 {

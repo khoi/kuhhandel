@@ -12,6 +12,20 @@ type linearTrade struct {
 	cards  int
 }
 
+type linearOffer struct {
+	money    game.Money
+	expanded bool
+}
+
+type linearPayment struct {
+	option   paymentOption
+	expanded bool
+}
+
+var linearOfferFractions = [...]float64{0.05, 0.1, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 1}
+
+var linearBidFractions = [...]float64{0.1, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 1}
+
 func linearTurnCandidates(snapshot game.Snapshot, lastTradeRemaining int) []linearCandidate {
 	candidates := []linearCandidate{}
 	canAuction := hasAction(snapshot, "turn.auction")
@@ -37,8 +51,10 @@ func linearTurnCandidates(snapshot game.Snapshot, lastTradeRemaining int) []line
 	}
 	for _, trade := range trades {
 		for _, offer := range linearOffers(snapshot.Self.Money) {
-			command := game.BeginTrade{TargetID: trade.target.ID, Animal: trade.animal, Offer: offer}
-			candidates = append(candidates, linearCandidate{action: game.Command(command), features: linearTurnFeatures(snapshot, trade, offer)})
+			command := game.BeginTrade{TargetID: trade.target.ID, Animal: trade.animal, Offer: offer.money}
+			candidates = append(candidates, linearCandidate{
+				action: game.Command(command), features: linearTurnFeatures(snapshot, trade, offer.money), expanded: offer.expanded,
+			})
 		}
 	}
 	return candidates
@@ -50,9 +66,12 @@ func linearBidCandidates(snapshot game.Snapshot) []linearCandidate {
 		return candidates
 	}
 	minimum := snapshot.Public.Auction.HighestBid + 1
-	for _, option := range linearBidOptions(snapshot.Self.Money, minimum) {
+	for _, payment := range linearBidOptions(snapshot.Self.Money, minimum) {
+		option := payment.option
 		bid := game.PlaceBid{Amount: option.total, Payment: option.money}
-		candidates = append(candidates, linearCandidate{action: linearBid{bid: bid, will: true}, features: linearBidFeatures(snapshot, option.total)})
+		candidates = append(candidates, linearCandidate{
+			action: linearBid{bid: bid, will: true}, features: linearBidFeatures(snapshot, option.total), expanded: payment.expanded,
+		})
 	}
 	return candidates
 }
@@ -77,8 +96,10 @@ func linearRespondCandidates(snapshot game.Snapshot) []linearCandidate {
 		candidates = append(candidates, linearCandidate{action: game.Command(game.AcceptTrade{})})
 	}
 	for _, offer := range linearOffers(snapshot.Self.Money) {
-		command := game.CounterTrade{Offer: offer}
-		candidates = append(candidates, linearCandidate{action: game.Command(command), features: linearTradeFeatures(snapshot, offer)})
+		command := game.CounterTrade{Offer: offer.money}
+		candidates = append(candidates, linearCandidate{
+			action: game.Command(command), features: linearTradeFeatures(snapshot, offer.money), expanded: offer.expanded,
+		})
 	}
 	return candidates
 }
@@ -86,8 +107,10 @@ func linearRespondCandidates(snapshot game.Snapshot) []linearCandidate {
 func linearReofferCandidates(snapshot game.Snapshot) []linearCandidate {
 	candidates := []linearCandidate{}
 	for _, offer := range linearOffers(snapshot.Self.Money) {
-		command := game.ReofferTrade{Offer: offer}
-		candidates = append(candidates, linearCandidate{action: command, features: linearTradeFeatures(snapshot, offer)})
+		command := game.ReofferTrade{Offer: offer.money}
+		candidates = append(candidates, linearCandidate{
+			action: command, features: linearTradeFeatures(snapshot, offer.money), expanded: offer.expanded,
+		})
 	}
 	return candidates
 }
@@ -125,25 +148,27 @@ func linearTradePriority(snapshot game.Snapshot, trade linearTrade) int {
 	return tradePriority(self.Animals[trade.animal], trade.target.Animals[trade.animal], trade.cards)
 }
 
-func linearOffers(money game.Money) []game.Money {
-	offers := []game.Money{}
-	seen := map[game.Money]bool{}
-	add := func(offer game.Money) {
-		if !seen[offer] {
-			seen[offer] = true
-			offers = append(offers, offer)
+func linearOffers(money game.Money) []linearOffer {
+	offers := []linearOffer{}
+	seen := map[game.Money]int{}
+	add := func(offer game.Money, expanded bool) {
+		if index, exists := seen[offer]; exists {
+			offers[index].expanded = offers[index].expanded && expanded
+		} else {
+			seen[offer] = len(offers)
+			offers = append(offers, linearOffer{money: offer, expanded: expanded})
 		}
 	}
 	if money.Zero > 0 {
-		add(game.Money{Zero: 1})
+		add(game.Money{Zero: 1}, false)
 	}
 	options := paymentOptions(money)
 	total := moneyTotal(money)
-	for _, fraction := range [...]float64{0.1, 0.25, 0.5, 0.75, 1} {
+	for _, fraction := range linearOfferFractions {
 		maximum := int(float64(total) * fraction)
 		for index := len(options) - 1; index >= 0; index-- {
 			if options[index].total <= maximum {
-				add(options[index].money)
+				add(options[index].money, !linearLegacyOfferFraction(fraction))
 				break
 			}
 		}
@@ -151,34 +176,44 @@ func linearOffers(money game.Money) []game.Money {
 	return offers
 }
 
-func linearBidOptions(money game.Money, minimum int) []paymentOption {
+func linearBidOptions(money game.Money, minimum int) []linearPayment {
 	options := paymentOptions(money)
-	selected := []paymentOption{}
-	seen := map[int]bool{}
-	add := func(option paymentOption) {
-		if option.total >= minimum && !seen[option.total] {
-			seen[option.total] = true
-			selected = append(selected, option)
+	selected := []linearPayment{}
+	seen := map[int]int{}
+	add := func(option paymentOption, expanded bool) {
+		if index, exists := seen[option.total]; exists {
+			selected[index].expanded = selected[index].expanded && expanded
+		} else if option.total >= minimum {
+			seen[option.total] = len(selected)
+			selected = append(selected, linearPayment{option: option, expanded: expanded})
 		}
 	}
 	for _, option := range options {
 		if option.total >= minimum {
-			add(option)
+			add(option, false)
 			break
 		}
 	}
 	total := moneyTotal(money)
-	for _, fraction := range [...]float64{0.25, 0.5, 0.75, 1} {
+	for _, fraction := range linearBidFractions {
 		maximum := int(float64(total) * fraction)
 		for index := len(options) - 1; index >= 0; index-- {
 			if options[index].total <= maximum {
-				add(options[index])
+				add(options[index], !linearLegacyBidFraction(fraction))
 				break
 			}
 		}
 	}
 	sort.Slice(selected, func(first, second int) bool {
-		return selected[first].total < selected[second].total
+		return selected[first].option.total < selected[second].option.total
 	})
 	return selected
+}
+
+func linearLegacyOfferFraction(fraction float64) bool {
+	return fraction == 0.1 || fraction == 0.25 || fraction == 0.5 || fraction == 0.75 || fraction == 1
+}
+
+func linearLegacyBidFraction(fraction float64) bool {
+	return fraction == 0.25 || fraction == 0.5 || fraction == 0.75 || fraction == 1
 }

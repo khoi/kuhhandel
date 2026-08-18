@@ -20,8 +20,9 @@ func TestServeReportsShapeAndRollout(t *testing.T) {
 	if err := decoder.Decode(&shape); err != nil {
 		t.Fatal(err)
 	}
-	if shape.Decisions != strategy.LinearDecisionCount || shape.Features != strategy.LinearFeatureCount {
-		t.Fatalf("shape = %d,%d", shape.Decisions, shape.Features)
+	if shape.Decisions != strategy.LearnedDecisionCount || shape.Features != strategy.LearnedFeatureCount ||
+		shape.Hidden != strategy.LearnedHiddenCount || shape.Parameters != strategy.LearnedParameterCount {
+		t.Fatalf("shape = %+v", shape)
 	}
 	var rollout response
 	if err := decoder.Decode(&rollout); err != nil {
@@ -37,6 +38,7 @@ func TestHandleRejectsInvalidRequests(t *testing.T) {
 		{},
 		{Kind: "rollout", Players: 2, Seeds: 1},
 		{Kind: "rollout", Players: 3, Seeds: 0},
+		{Kind: "rollout", Players: 3, Seeds: 1, Exploration: 2},
 		{Kind: "rollout", Players: 3, Seeds: 1, Weights: [][]float64{{1}}},
 		{Kind: "rollout", Players: 3, Seeds: 1, Opponents: [][][]float64{{{1}}}},
 	} {
@@ -51,12 +53,12 @@ func TestSampledRolloutReportsGradientShape(t *testing.T) {
 	if result.Error != "" {
 		t.Fatal(result.Error)
 	}
-	if len(result.RewardGradient) != strategy.LinearDecisionCount {
+	if len(result.RewardGradient) != strategy.LearnedDecisionCount {
 		t.Fatalf("gradient decisions = %d", len(result.RewardGradient))
 	}
 	for _, row := range result.RewardGradient {
-		if len(row) != strategy.LinearFeatureCount {
-			t.Fatalf("gradient features = %d", len(row))
+		if len(row) != strategy.LearnedParameterCount {
+			t.Fatalf("gradient parameters = %d", len(row))
 		}
 	}
 }

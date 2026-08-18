@@ -37,6 +37,30 @@ class Rollout:
         )
 
 
+@dataclass(frozen=True)
+class PolicyShape:
+    decisions: int
+    features: int
+    hidden: int
+    parameters: int
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> PolicyShape:
+        shape = cls(
+            decisions=int(payload["decisions"]),
+            features=int(payload["features"]),
+            hidden=int(payload["hidden"]),
+            parameters=int(payload["parameters"]),
+        )
+        if shape.parameters != shape.features + shape.hidden * (shape.features + 2):
+            raise RuntimeError("rollout worker returned an invalid policy shape")
+        return shape
+
+    @property
+    def tensor(self) -> tuple[int, int]:
+        return self.decisions, self.parameters
+
+
 class RolloutWorker:
     def __init__(self, root: Path, go: str = "go") -> None:
         self._process = subprocess.Popen(
@@ -60,9 +84,8 @@ class RolloutWorker:
     ) -> None:
         self.close()
 
-    def shape(self) -> tuple[int, int]:
-        payload = self._request({"kind": "shape"})
-        return int(payload["decisions"]), int(payload["features"])
+    def shape(self) -> PolicyShape:
+        return PolicyShape.from_payload(self._request({"kind": "shape"}))
 
     def rollout(
         self,
@@ -72,6 +95,7 @@ class RolloutWorker:
         seed: int,
         sample: bool,
         opponents: list[torch.Tensor] | None = None,
+        exploration: float = 0.02,
     ) -> Rollout:
         payload = self._request(
             {
@@ -80,6 +104,7 @@ class RolloutWorker:
                 "seeds": seeds,
                 "seed": seed,
                 "sample": sample,
+                "exploration": exploration,
                 "weights": weights.detach().cpu().tolist(),
                 "opponents": [opponent.detach().cpu().tolist() for opponent in opponents or []],
             }
@@ -140,14 +165,20 @@ def reward_order(candidate: Rollout, best: Rollout) -> int:
     return int(candidate.mean_reward > best.mean_reward) - int(candidate.mean_reward < best.mean_reward)
 
 
+def checkpoint_steps(steps: int, interval: int) -> list[int]:
+    checkpoints = list(range(interval, steps + 1, interval))
+    if not checkpoints or checkpoints[-1] != steps:
+        checkpoints.append(steps)
+    return checkpoints
+
+
 def train(arguments: argparse.Namespace) -> Rollout:
     root = repository_root(arguments.root)
     with RolloutWorker(root, arguments.go) as worker:
-        decisions, features = worker.shape()
-        shape = (decisions, features)
+        shape = worker.shape()
         weights = torch.nn.Parameter(initial_weights(arguments.initial, arguments.players, shape))
-        if arguments.freeze_features > features:
-            raise RuntimeError(f"cannot freeze {arguments.freeze_features} of {features} features")
+        if arguments.freeze_parameters > shape.parameters:
+            raise RuntimeError(f"cannot freeze {arguments.freeze_parameters} of {shape.parameters} parameters")
         opponents = opponent_pool(
             arguments.opponent,
             arguments.players,
@@ -157,33 +188,63 @@ def train(arguments: argparse.Namespace) -> Rollout:
         optimizer = torch.optim.Adam([weights], lr=arguments.learning_rate)
         baseline = 1 / arguments.players
         validation_seed = arguments.seed + arguments.steps * arguments.batch_seeds
-        held_out_seed = validation_seed + arguments.eval_seeds
+        checkpoints = checkpoint_steps(arguments.steps, arguments.eval_every)
+        held_out_seed = validation_seed + (len(checkpoints) + 1) * arguments.eval_seeds
         best_weights = weights.detach().clone()
         best_step = 0
-        best = worker.rollout(best_weights, arguments.players, arguments.eval_seeds, validation_seed, False, opponents)
+        best = worker.rollout(
+            best_weights,
+            arguments.players,
+            arguments.eval_seeds,
+            validation_seed,
+            False,
+            opponents,
+            arguments.exploration,
+        )
         print_result("checkpoint 0", best)
+        checkpoint_index = 0
         for step in range(1, arguments.steps + 1):
             training_seed = arguments.seed + (step - 1) * arguments.batch_seeds
-            rollout = worker.rollout(weights, arguments.players, arguments.batch_seeds, training_seed, True, opponents)
+            rollout = worker.rollout(
+                weights,
+                arguments.players,
+                arguments.batch_seeds,
+                training_seed,
+                True,
+                opponents,
+                arguments.exploration,
+            )
             gradient = policy_gradient(rollout, baseline, weights)
-            gradient[:, : arguments.freeze_features] = 0
+            gradient[:, : arguments.freeze_parameters] = 0
             optimizer.zero_grad(set_to_none=True)
             weights.grad = -gradient
             torch.nn.utils.clip_grad_norm_([weights], arguments.max_gradient)
             optimizer.step()
             baseline += arguments.baseline_rate * (rollout.mean_reward - baseline)
-            if step % arguments.eval_every != 0 and step != arguments.steps:
+            if step != checkpoints[checkpoint_index]:
                 continue
+            checkpoint_index += 1
+            checkpoint_seed = validation_seed + checkpoint_index * arguments.eval_seeds
             evaluated = worker.rollout(
                 weights,
                 arguments.players,
                 arguments.eval_seeds,
-                validation_seed,
+                checkpoint_seed,
                 False,
                 opponents,
+                arguments.exploration,
+            )
+            incumbent = worker.rollout(
+                best_weights,
+                arguments.players,
+                arguments.eval_seeds,
+                checkpoint_seed,
+                False,
+                opponents,
+                arguments.exploration,
             )
             print_result(f"checkpoint {step}", evaluated)
-            order = reward_order(evaluated, best)
+            order = reward_order(evaluated, incumbent)
             if order > 0:
                 best = evaluated
                 best_weights = weights.detach().clone()
@@ -192,7 +253,7 @@ def train(arguments: argparse.Namespace) -> Rollout:
                 with torch.no_grad():
                     weights.copy_(best_weights)
                 optimizer.state.clear()
-                baseline = best.mean_reward
+                baseline = incumbent.mean_reward
         held_out = worker.rollout(
             best_weights,
             arguments.players,
@@ -200,6 +261,7 @@ def train(arguments: argparse.Namespace) -> Rollout:
             held_out_seed,
             False,
             opponents,
+            arguments.exploration,
         )
         print_result("held-out", held_out)
         save_checkpoint(arguments.checkpoint, best_weights, arguments.players, best_step, best)
@@ -211,8 +273,7 @@ def train(arguments: argparse.Namespace) -> Rollout:
 def evaluate(arguments: argparse.Namespace) -> Rollout:
     root = repository_root(arguments.root)
     with RolloutWorker(root, arguments.go) as worker:
-        decisions, features = worker.shape()
-        shape = (decisions, features)
+        shape = worker.shape()
         weights = fit_model(load_model(arguments.evaluate, arguments.players), shape)
         opponents = opponent_pool(
             arguments.opponent,
@@ -220,7 +281,15 @@ def evaluate(arguments: argparse.Namespace) -> Rollout:
             shape,
             not arguments.exclude_guide,
         )
-        result = worker.rollout(weights, arguments.players, arguments.held_out_seeds, arguments.seed, False, opponents)
+        result = worker.rollout(
+            weights,
+            arguments.players,
+            arguments.held_out_seeds,
+            arguments.seed,
+            False,
+            opponents,
+            arguments.exploration,
+        )
     print_result("evaluation", result)
     return result
 
@@ -275,10 +344,10 @@ def load_model(path: Path, players: int) -> torch.Tensor:
 def opponent_pool(
     paths: list[Path],
     players: int,
-    shape: tuple[int, int],
+    shape: PolicyShape,
     include_guide: bool,
 ) -> list[torch.Tensor]:
-    opponents = [torch.zeros(shape, dtype=torch.float64)] if include_guide else []
+    opponents = [torch.zeros(shape.tensor, dtype=torch.float64)] if include_guide else []
     for path in paths:
         opponents.append(fit_model(load_model(path, players), shape))
     if not opponents:
@@ -286,20 +355,33 @@ def opponent_pool(
     return opponents
 
 
-def initial_weights(path: Path | None, players: int, shape: tuple[int, int]) -> torch.Tensor:
-    if path is None:
-        return torch.zeros(shape, dtype=torch.float64)
-    return fit_model(load_model(path, players), shape)
+def initial_weights(path: Path | None, players: int, shape: PolicyShape) -> torch.Tensor:
+    weights = (
+        torch.zeros((shape.decisions, shape.features), dtype=torch.float64)
+        if path is None
+        else load_model(path, players)
+    )
+    return fit_model(weights, shape)
 
 
-def fit_model(weights: torch.Tensor, shape: tuple[int, int]) -> torch.Tensor:
-    widths = {shape[1] // 2, shape[1]}
-    if weights.ndim != 2 or weights.shape[0] != shape[0] or weights.shape[1] not in widths:
-        raise RuntimeError(f"model shape {tuple(weights.shape)} does not fit {shape}")
-    if weights.shape[1] == shape[1]:
+def fit_model(weights: torch.Tensor, shape: PolicyShape) -> torch.Tensor:
+    widths = {shape.features // 2, shape.features, shape.parameters}
+    if weights.ndim != 2 or weights.shape[0] != shape.decisions or weights.shape[1] not in widths:
+        raise RuntimeError(f"model shape {tuple(weights.shape)} does not fit {shape.tensor}")
+    if weights.shape[1] == shape.parameters:
         return weights
-    missing = torch.zeros((shape[0], shape[1] - weights.shape[1]), dtype=weights.dtype)
-    return torch.cat((weights, missing), dim=1)
+    fitted = torch.zeros(shape.tensor, dtype=weights.dtype)
+    fitted[:, : weights.shape[1]] = weights
+    hidden_start = shape.features
+    hidden_end = hidden_start + shape.hidden * shape.features
+    generator = torch.Generator().manual_seed(1)
+    scale = (2 / (shape.features + shape.hidden)) ** 0.5
+    fitted[:, hidden_start:hidden_end] = torch.randn(
+        (shape.decisions, shape.hidden * shape.features),
+        dtype=weights.dtype,
+        generator=generator,
+    ) * scale
+    return fitted
 
 
 def print_result(label: str, rollout: Rollout) -> None:
@@ -319,8 +401,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--seed", type=nonnegative_int, default=7_000_000)
     result.add_argument("--learning-rate", type=positive_float, default=0.005)
     result.add_argument("--baseline-rate", type=unit_float, default=0.02)
+    result.add_argument("--exploration", type=unit_float, default=0.02)
     result.add_argument("--max-gradient", type=positive_float, default=5)
-    result.add_argument("--freeze-features", type=nonnegative_int, default=0)
+    result.add_argument("--freeze-parameters", type=nonnegative_int, default=0)
     result.add_argument("--checkpoint", type=Path, default=Path("learning/checkpoints/best.pt"))
     result.add_argument("--export", type=Path)
     result.add_argument("--evaluate", type=Path)

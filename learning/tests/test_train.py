@@ -9,8 +9,10 @@ from pathlib import Path
 import torch
 
 from kuhhandel_learning.train import (
+    PolicyShape,
     Rollout,
     RolloutWorker,
+    checkpoint_steps,
     fit_model,
     initial_weights,
     load_model,
@@ -35,12 +37,18 @@ class TrainerTests(unittest.TestCase):
         self.assertEqual(reward_order(Rollout(1, 0.25, 0, 1, [], [], []), best), 0)
         self.assertEqual(reward_order(Rollout(1, 0.24, 0, 1, [], [], []), best), -1)
 
+    def test_checkpoint_steps_include_last_step_once(self) -> None:
+        self.assertEqual(checkpoint_steps(100, 20), [20, 40, 60, 80, 100])
+        self.assertEqual(checkpoint_steps(101, 20), [20, 40, 60, 80, 100, 101])
+        self.assertEqual(checkpoint_steps(1, 20), [1])
+
     def test_argument_ranges(self) -> None:
         for arguments in (
             ["--steps", "0"],
             ["--players", "2"],
             ["--baseline-rate", "2"],
-            ["--freeze-features", "-1"],
+            ["--exploration", "0"],
+            ["--freeze-parameters", "-1"],
         ):
             with contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
@@ -49,9 +57,10 @@ class TrainerTests(unittest.TestCase):
     def test_worker_reports_shape_and_equal_policy_share(self) -> None:
         root = Path(__file__).resolve().parents[2]
         with RolloutWorker(root) as worker:
-            decisions, features = worker.shape()
-            weights = torch.zeros((decisions, features), dtype=torch.float64)
+            shape = worker.shape()
+            weights = torch.zeros(shape.tensor, dtype=torch.float64)
             rollout = worker.rollout(weights, 3, 2, 801, False)
+        self.assertEqual(shape, PolicyShape(5, 32, 8, 304))
         self.assertEqual(rollout.games, 6)
         self.assertAlmostEqual(rollout.mean_reward, 1 / 3)
 
@@ -78,27 +87,36 @@ class TrainerTests(unittest.TestCase):
             )
             result = train(arguments)
             self.assertEqual(result.games, 3)
-            self.assertEqual(load_model(arguments.checkpoint, 3).shape, (5, 32))
-            self.assertEqual(load_model(arguments.export, 3).shape, (5, 32))
-            opponents = opponent_pool([arguments.export], 3, (5, 32), True)
+            shape = PolicyShape(5, 32, 8, 304)
+            self.assertEqual(load_model(arguments.checkpoint, 3).shape, shape.tensor)
+            self.assertEqual(load_model(arguments.export, 3).shape, shape.tensor)
+            opponents = opponent_pool([arguments.export], 3, shape, True)
             self.assertEqual(len(opponents), 2)
             self.assertEqual(torch.count_nonzero(opponents[0]), 0)
-            self.assertEqual(torch.count_nonzero(initial_weights(None, 3, (5, 32))), 0)
-            self.assertTrue(torch.equal(initial_weights(arguments.export, 3, (5, 32)), opponents[1]))
+            initial = initial_weights(None, 3, shape)
+            self.assertEqual(torch.count_nonzero(initial[:, : shape.features]), 0)
+            self.assertGreater(torch.count_nonzero(initial[:, shape.features :]), 0)
+            output_start = shape.features + shape.hidden * (shape.features + 1)
+            self.assertEqual(torch.count_nonzero(initial[:, output_start:]), 0)
+            self.assertTrue(torch.equal(initial_weights(arguments.export, 3, shape), opponents[1]))
             with self.assertRaises(RuntimeError):
-                opponent_pool([], 3, (5, 32), False)
+                opponent_pool([], 3, shape, False)
             with self.assertRaises(RuntimeError):
                 load_model(arguments.export, 5)
 
     def test_fit_model_derives_new_zero_weights(self) -> None:
+        shape = PolicyShape(5, 32, 8, 304)
         legacy = torch.ones((5, 16), dtype=torch.float64)
-        fitted = fit_model(legacy, (5, 32))
+        fitted = fit_model(legacy, shape)
         self.assertTrue(torch.equal(fitted[:, :16], legacy))
-        self.assertEqual(torch.count_nonzero(fitted[:, 16:]), 0)
+        self.assertEqual(torch.count_nonzero(fitted[:, 16:32]), 0)
+        self.assertGreater(torch.count_nonzero(fitted[:, 32:288]), 0)
+        self.assertEqual(torch.count_nonzero(fitted[:, 288:]), 0)
+        self.assertTrue(torch.equal(fitted, fit_model(legacy, shape)))
         with self.assertRaises(RuntimeError):
-            fit_model(torch.zeros((4, 16), dtype=torch.float64), (5, 32))
+            fit_model(torch.zeros((4, 16), dtype=torch.float64), shape)
         with self.assertRaises(RuntimeError):
-            fit_model(torch.zeros((5, 15), dtype=torch.float64), (5, 32))
+            fit_model(torch.zeros((5, 15), dtype=torch.float64), shape)
 
 
 if __name__ == "__main__":

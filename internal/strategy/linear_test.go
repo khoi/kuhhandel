@@ -8,7 +8,7 @@ import (
 	"github.com/khoi/kuhhandel/internal/game"
 )
 
-func TestLinearPolicyMatchesGuideWithZeroWeights(t *testing.T) {
+func TestLearnedPolicyMatchesGuideWithZeroWeights(t *testing.T) {
 	for players := 3; players <= 5; players++ {
 		result, err := Rollout(RolloutOptions{Players: players, Seeds: 10, Seed: 701})
 		if err != nil {
@@ -24,7 +24,7 @@ func TestLinearPolicyMatchesGuideWithZeroWeights(t *testing.T) {
 	}
 }
 
-func TestSampledLinearPolicyReturnsGradients(t *testing.T) {
+func TestSampledLearnedPolicyReturnsGradients(t *testing.T) {
 	first, err := Rollout(RolloutOptions{Players: 3, Seeds: 5, Seed: 901, Sample: true})
 	if err != nil {
 		t.Fatal(err)
@@ -36,15 +36,15 @@ func TestSampledLinearPolicyReturnsGradients(t *testing.T) {
 	if !reflect.DeepEqual(first, second) {
 		t.Fatal("sampled rollout is not deterministic")
 	}
-	if first.MeanDecisions == 0 || first.MeanGradient == (LinearGradient{}) {
+	if first.MeanDecisions == 0 || first.MeanGradient == (LearnedGradient{}) {
 		t.Fatal("sampled rollout has no policy gradient")
 	}
 }
 
-func TestSampledLinearPolicyExploresAroundCurrentPolicy(t *testing.T) {
-	model := LinearModel{}
+func TestSampledLearnedPolicyExploresAroundCurrentPolicy(t *testing.T) {
+	model := LearnedModel{}
 	model.Weights[linearTurnDecision][0] = 1
-	policy := NewLinear(model, ThreePlayerChampion(), 902, true)
+	policy := NewLearned(&model, ThreePlayerChampion(), 902, true, 0)
 	candidates := []linearCandidate{
 		{action: 0, guided: true},
 		{action: 1, features: linearFeatures{1}},
@@ -60,11 +60,35 @@ func TestSampledLinearPolicyExploresAroundCurrentPolicy(t *testing.T) {
 	}
 }
 
+func TestExpandedChoicesRequireLearnedResidual(t *testing.T) {
+	model := LearnedModel{}
+	model.Weights[linearTurnDecision][0] = 1
+	candidates := []linearCandidate{
+		{action: 0, guided: true},
+		{action: 1, features: linearFeatures{0.6}},
+		{action: 2, features: linearFeatures{2}, expanded: true},
+	}
+	legacy := NewLearned(&model, ThreePlayerChampion(), 1, false, 0)
+	if selected := legacy.choose(linearTurnDecision, candidates).(int); selected != 1 {
+		t.Fatalf("legacy choice = %d, want 1", selected)
+	}
+	model.Weights[linearBidDecision][learnedOutputOffset(0)] = 0.1
+	otherDecision := NewLearned(&model, ThreePlayerChampion(), 1, false, 0)
+	if selected := otherDecision.choose(linearTurnDecision, candidates).(int); selected != 1 {
+		t.Fatalf("choice with another residual = %d, want 1", selected)
+	}
+	model.Weights[linearTurnDecision][learnedOutputOffset(0)] = 0.1
+	expanded := NewLearned(&model, ThreePlayerChampion(), 1, false, 0)
+	if selected := expanded.choose(linearTurnDecision, candidates).(int); selected != 2 {
+		t.Fatalf("expanded choice = %d, want 2", selected)
+	}
+}
+
 func TestRolloutWithMixedOpponentsIsDeterministic(t *testing.T) {
-	opponent := LinearModel{}
+	opponent := LearnedModel{}
 	opponent.Weights[linearTurnDecision][0] = 1
 	options := RolloutOptions{
-		OpponentModels: []LinearModel{{}, opponent},
+		OpponentModels: []LearnedModel{{}, opponent},
 		Players:        3,
 		Seeds:          5,
 		Seed:           950,
@@ -82,29 +106,69 @@ func TestRolloutWithMixedOpponentsIsDeterministic(t *testing.T) {
 	}
 }
 
-func TestNewLinearModelValidatesShapeAndValues(t *testing.T) {
-	valid := make([][]float64, LinearDecisionCount)
+func TestNewLearnedModelValidatesShapeAndValues(t *testing.T) {
+	valid := make([][]float64, LearnedDecisionCount)
 	for decision := range valid {
-		valid[decision] = make([]float64, LinearFeatureCount)
+		valid[decision] = make([]float64, LearnedParameterCount)
 	}
-	if _, err := NewLinearModel(valid); err != nil {
+	if _, err := NewLearnedModel(valid); err != nil {
 		t.Fatal(err)
 	}
 	for _, weights := range [][][]float64{
 		{{1}},
-		append(valid[:LinearDecisionCount-1:LinearDecisionCount-1], []float64{1}),
+		append(valid[:LearnedDecisionCount-1:LearnedDecisionCount-1], []float64{1}),
 	} {
-		if _, err := NewLinearModel(weights); err == nil {
+		if _, err := NewLearnedModel(weights); err == nil {
 			t.Fatal("invalid model succeeded")
 		}
 	}
-	invalid := make([][]float64, LinearDecisionCount)
+	invalid := make([][]float64, LearnedDecisionCount)
 	for decision := range invalid {
-		invalid[decision] = make([]float64, LinearFeatureCount)
+		invalid[decision] = make([]float64, LearnedParameterCount)
 	}
 	invalid[0][0] = math.NaN()
-	if _, err := NewLinearModel(invalid); err == nil {
+	if _, err := NewLearnedModel(invalid); err == nil {
 		t.Fatal("non-finite model succeeded")
+	}
+}
+
+func TestLearnedScoreGradientMatchesFiniteDifference(t *testing.T) {
+	model := LearnedModel{}
+	for parameter := range LearnedParameterCount {
+		model.Weights[linearBidDecision][parameter] = float64(parameter%11-5) / 50
+	}
+	features := linearFeatures{}
+	for feature := range features {
+		features[feature] = float64(feature%7-3) / 4
+	}
+	policy := NewLearned(&model, ThreePlayerChampion(), 1, false, 0)
+	gradient := policy.scoreGradient(linearBidDecision, features)
+	const epsilon = 1e-6
+	for parameter := range LearnedParameterCount {
+		plus := model
+		minus := model
+		plus.Weights[linearBidDecision][parameter] += epsilon
+		minus.Weights[linearBidDecision][parameter] -= epsilon
+		plusScore := NewLearned(&plus, ThreePlayerChampion(), 1, false, 0).score(linearBidDecision, features)
+		minusScore := NewLearned(&minus, ThreePlayerChampion(), 1, false, 0).score(linearBidDecision, features)
+		finite := (plusScore - minusScore) / (2 * epsilon)
+		if math.Abs(gradient[parameter]-finite) > 1e-8 {
+			t.Fatalf("gradient %d = %f, want %f", parameter, gradient[parameter], finite)
+		}
+	}
+}
+
+func TestZeroNeuralOutputPreservesLinearScore(t *testing.T) {
+	model := LearnedModel{}
+	features := linearFeatures{1, 0.25, -0.5}
+	model.Weights[linearTurnDecision][0] = 2
+	model.Weights[linearTurnDecision][1] = 4
+	for parameter := LearnedFeatureCount; parameter < learnedBiasOffset(0); parameter++ {
+		model.Weights[linearTurnDecision][parameter] = 1
+	}
+	policy := NewLearned(&model, ThreePlayerChampion(), 1, false, 0)
+	if score := policy.score(linearTurnDecision, features); score != 3 {
+		t.Fatalf("score = %f, want 3", score)
 	}
 }
 
@@ -162,5 +226,15 @@ func TestLinearInteractionsExpandBaseFeatures(t *testing.T) {
 	interactions := linearInteractions(linearTurnDecision, features)
 	if interactions[0] != 0.2 || interactions[1] != 0.15 {
 		t.Fatalf("interactions = %v", interactions)
+	}
+}
+
+func TestLearnedPolicyUsesWiderBidAndOfferChoices(t *testing.T) {
+	money := game.Money{Ten: 10, Fifty: 2, Hundred: 2, TwoHundred: 1, FiveHundred: 1}
+	if bids := linearBidOptions(money, 1); len(bids) < 10 {
+		t.Fatalf("bid choices = %d, want at least 10", len(bids))
+	}
+	if offers := linearOffers(money); len(offers) < 11 {
+		t.Fatalf("offer choices = %d, want at least 11", len(offers))
 	}
 }
