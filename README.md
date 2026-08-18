@@ -12,6 +12,8 @@ Health check: `GET /health`
 
 WebSocket: `GET /ws`
 
+Python clients can use the typed async [SDK](sdk/python/README.md).
+
 ## Messages
 
 Send:
