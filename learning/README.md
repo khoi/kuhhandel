@@ -25,6 +25,7 @@ Evaluate the saved research models:
 
 ```sh
 uv run --project learning kuhhandel-learn --players 3 --evaluate learning/models/three-player.json --held-out-seeds 1000 --seed 6500000
+uv run --project learning kuhhandel-learn --players 4 --evaluate learning/models/four-player.json --held-out-seeds 1000 --seed 330000000
 uv run --project learning kuhhandel-learn --players 5 --evaluate learning/models/five-player.json --held-out-seeds 1000 --seed 6900000
 ```
 

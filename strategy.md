@@ -12,7 +12,7 @@ The best policies found use the same core plan:
 6. Do not use routine zero-card offers. Keep offer size uncertain instead.
 7. After the deck ends, prefer a trade that completes a set, then one between equal holdings.
 
-Policy-gradient training and self-play found stronger replies for three and five players. Use the saved learned policy for those player counts and the heuristic champion for four players. A nonlinear three-player reply now replaces the prior learned policy. A fresh reply could not exploit it. These are empirical results against the policies tested. They are not a solved equilibrium.
+Policy-gradient training, self-play, and cross-player transfer found stronger policies for every player count. Use the matching saved model. A nonlinear three-player reply replaces the prior learned policy, and a scaled copy of its turn policy improves four-player play. Fresh replies could not exploit either one. These are empirical results against the policies tested. They are not a solved equilibrium.
 
 ## Valuation
 
@@ -43,7 +43,7 @@ Under the server rules, a target holding a zero card should counter with zero in
 
 ## Evidence
 
-The experiments completed more than 1.2 million games. Each comparison rotates the challenger through every seat. Every challenger policy faces the same shuffle seeds and policy random streams for a given opponent. A table cell measures one challenger against copies of the column policy.
+The experiments completed more than 1.5 million games. Each comparison rotates the challenger through every seat. Every challenger policy faces the same shuffle seeds and policy random streams for a given opponent. A table cell measures one challenger against copies of the column policy.
 
 The broad policy comparison found auction-first play best:
 
@@ -99,7 +99,11 @@ The three-player result used 30,000 unseen shuffle seeds with every seat rotatio
 
 A decision-row ablation then found that the learned first-refusal row reduced results. Replacing it with the guide scored 33.89% ± 0.11% against the saved policy over 30,000 unseen seeds. Reducing the turn row by 10% then scored 33.622% ± 0.050% against the ablated policy over another 30,000 seeds. The final model scored 33.781% ± 0.114% against the last committed model over 30,000 further seeds and 44.1% ± 0.3% against the guide over 10,000 seeds. A trained reply against the ablated model scored 33.4% ± 0.3% on 10,000 fresh seeds, so it was rejected.
 
-The final three-player policy changes a mean 2.03 turn choices and 1.69 bids per game from its guide. It now uses the guide for first refusal. The five-player policy changes 0.52 turn choices, 0.22 bids, and 0.38 first-refusal choices. Neither learned policy changes trade responses or second offers under the fixed evaluation margin.
+The final three-player policy changes a mean 2.03 turn choices and 1.69 bids per game from its guide. It now uses the guide for first refusal. The five-player policy changes 0.52 turn choices, 0.22 bids, and 0.38 first-refusal choices. The three- and five-player policies do not change trade responses or second offers under the fixed evaluation margin.
+
+The three-player model also transferred well to four-player games. It scored 29.46% ± 0.49% against the four-player guide over 2,000 seeds, against a 25% equal share. Row ablations traced the gain to its turn policy. Reducing that row by 15% scored 25.289% ± 0.062% against the unscaled transfer over 10,000 unseen seeds. The final four-player model scored 29.0% ± 0.2% against the guide over another 10,000 seeds. A self-play reply scored 24.4% ± 0.5%, while a reply trained against the model and guide scored 26.8% ± 0.5% against 26.9% ± 0.4% for the unchanged model on the same pool and seeds. Both replies were rejected.
+
+The four-player policy changes a mean 0.77 turn choices and 3.06 bids per game from its guide. It uses the guide for first refusal, trade responses, and second offers.
 
 ## Model
 
@@ -137,6 +141,7 @@ uv run --project learning kuhhandel-learn --players 5 --steps 140 --batch-seeds 
 uv run --project learning kuhhandel-learn --players 4 --steps 100 --batch-seeds 24 --eval-every 20 --eval-seeds 200 --held-out-seeds 500 --seed 11100000 --learning-rate 0.005 --freeze-parameters 16
 uv run --project learning kuhhandel-learn --players 3 --steps 180 --batch-seeds 32 --eval-every 30 --eval-seeds 300 --held-out-seeds 800 --seed 12900000 --learning-rate 0.001 --exploration 0.1 --freeze-parameters 32 --initial learning/models/three-player.json --opponent learning/models/three-player.json --exclude-guide
 uv run --project learning kuhhandel-learn --players 3 --evaluate learning/models/three-player.json --held-out-seeds 1000 --seed 6500000
+uv run --project learning kuhhandel-learn --players 4 --evaluate learning/models/four-player.json --held-out-seeds 1000 --seed 330000000
 uv run --project learning kuhhandel-learn --players 5 --evaluate learning/models/five-player.json --held-out-seeds 1000 --seed 6900000
 ```
 
