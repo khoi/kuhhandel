@@ -43,7 +43,7 @@ Under the server rules, a target holding a zero card should counter with zero in
 
 ## Evidence
 
-The experiments completed more than 1.5 million games. Each comparison rotates the challenger through every seat. Every challenger policy faces the same shuffle seeds and policy random streams for a given opponent. A table cell measures one challenger against copies of the column policy.
+The experiments completed more than 1.7 million games. Each comparison rotates the challenger through every seat. Every challenger policy faces the same shuffle seeds and policy random streams for a given opponent. A table cell measures one challenger against copies of the column policy.
 
 The broad policy comparison found auction-first play best:
 
@@ -104,6 +104,10 @@ The final three-player policy changes a mean 2.03 turn choices and 1.69 bids per
 The three-player model also transferred well to four-player games. It scored 29.46% ± 0.49% against the four-player guide over 2,000 seeds, against a 25% equal share. Row ablations traced the gain to its turn policy. Reducing that row by 15% scored 25.289% ± 0.062% against the unscaled transfer over 10,000 unseen seeds. The final four-player model scored 29.0% ± 0.2% against the guide over another 10,000 seeds. A self-play reply scored 24.4% ± 0.5%, while a reply trained against the model and guide scored 26.8% ± 0.5% against 26.9% ± 0.4% for the unchanged model on the same pool and seeds. Both replies were rejected.
 
 The four-player policy changes a mean 0.77 turn choices and 3.06 bids per game from its guide. It uses the guide for first refusal, trade responses, and second offers.
+
+A full transfer matrix then tested every saved model in three- and five-player games. The matching models remained strongest against their guides at 43.57% ± 0.62% and 22.45% ± 0.35%. The best new five-player hybrid combined the four-player turn row with the five-player money rows, but it scored 20.020% ± 0.023% against the saved model over 10,000 unseen seeds. It was rejected.
+
+The next experiment reconciled individual cash estimates with the exact total money held by all opponents. It trained only eight new cash facts and their hidden-layer inputs, leaving every prior parameter fixed. Held-out replies scored 32.9% ± 0.3%, 24.8% ± 0.3%, and 20.0% ± 0.0% for three, four, and five players. None beat the matching equal-policy share, so the added model state was removed.
 
 ## Model
 
