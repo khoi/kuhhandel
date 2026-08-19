@@ -43,7 +43,7 @@ Under the server rules, a target holding a zero card should counter with zero in
 
 ## Evidence
 
-The experiments completed more than 1.7 million games. Each comparison rotates the challenger through every seat. Every challenger policy faces the same shuffle seeds and policy random streams for a given opponent. A table cell measures one challenger against copies of the column policy.
+The experiments completed more than 1.9 million games. Each comparison rotates the challenger through every seat. Every challenger policy faces the same shuffle seeds and policy random streams for a given opponent. A table cell measures one challenger against copies of the column policy.
 
 The broad policy comparison found auction-first play best:
 
@@ -108,6 +108,8 @@ The four-player policy changes a mean 0.77 turn choices and 3.06 bids per game f
 A full transfer matrix then tested every saved model in three- and five-player games. The matching models remained strongest against their guides at 43.57% ± 0.62% and 22.45% ± 0.35%. The best new five-player hybrid combined the four-player turn row with the five-player money rows, but it scored 20.020% ± 0.023% against the saved model over 10,000 unseen seeds. It was rejected.
 
 The next experiment reconciled individual cash estimates with the exact total money held by all opponents. It trained only eight new cash facts and their hidden-layer inputs, leaving every prior parameter fixed. Held-out replies scored 32.9% ± 0.3%, 24.8% ± 0.3%, and 20.0% ± 0.0% for three, four, and five players. None beat the matching equal-policy share, so the added model state was removed.
+
+A direct neural audit then scaled the linear, hidden, and residual parts of each active decision row. The only three-player candidate left after two screens, a 5% stronger bid linear term, scored 33.315% ± 0.139% against the saved model over 10,000 unseen seeds. The only four-player candidate, a 10% stronger turn linear term, scored 24.995% ± 0.038%. Both fell below their equal-policy shares and were rejected.
 
 ## Model
 
